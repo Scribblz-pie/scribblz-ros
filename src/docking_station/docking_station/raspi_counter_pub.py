@@ -14,7 +14,7 @@ class CounterPublisher(Node):
         msg = Int32()
         msg.data = self.counter
         self.publisher_.publish(msg)
-        self.get_logger().info(f'Publishing: {self.counter}')
+        self.get_logger().debug(f'Publishing: {self.counter}')
         self.counter += 1
 
 def main(args=None):
