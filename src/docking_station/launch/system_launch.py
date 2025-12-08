@@ -18,6 +18,14 @@ def generate_launch_description():
         output='screen'
     )
 
+    # Heartbeat listener node (UDP communication with Arduino)
+    heartbeat_listener_node = Node(
+        package='docking_station',
+        executable='heartbeat_listener',
+        name='heartbeat_listener',
+        output='screen'
+    )
+
     # micro-ROS agent
     micro_ros_agent_node = Node(
         package='micro_ros_agent',
@@ -39,6 +47,7 @@ def generate_launch_description():
     return LaunchDescription([
         docking_node,
         ir_led_docking_node,
+        heartbeat_listener_node,
         micro_ros_agent_node,
         foxglove_node
     ])
