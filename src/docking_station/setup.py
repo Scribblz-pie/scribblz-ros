@@ -29,6 +29,8 @@ setup(
             'raspi_counter = docking_station.raspi_counter_pub:main',
             'ir_led_docking = docking_station.ir_led_docking_node:main',
             'heartbeat_listener = docking_station.heartbeat_listener:main',
+            'teleop = docking_station.teleop_node:main',
+            'udp_command_sender = docking_station.udp_command_sender:main',
         ],
     },
 )
