@@ -1,5 +1,8 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include <Wire.h>
+#include <Adafruit_MotorShield.h>
+#include <Servo.h>
 
 // ---------------- WIFI SETTINGS ----------------
 const char* ssid = "OLIN-DEVICES";
@@ -7,16 +10,82 @@ const char* password = "BestOval4Engineers!";
 
 // ---------------- UDP SETTINGS -----------------
 WiFiUDP udp;
-const unsigned int localUdpPort = 54321;
+// MUST match the port defined in your Python script (UDP_PORT = 54322)
+const unsigned int localUdpPort = 54322;
+char packetBuffer[255]; // Buffer to hold incoming packet
 
-// ---------------- COUNTER ----------------------
-unsigned long heartbeatCounter = 0;
-unsigned long lastHeartbeat = 0;
+// ---------------- MOTOR DEFINITIONS ----------------
+#define MAX_SPEED 255
 
+Adafruit_MotorShield AFMS = Adafruit_MotorShield();
+Adafruit_DCMotor *wheel1 = AFMS.getMotor(2);
+Adafruit_DCMotor *wheel2 = AFMS.getMotor(3);
+Adafruit_DCMotor *wheel3 = AFMS.getMotor(4);
+
+// ---------------- FAN / ESC ------------------------
+Servo esc;
+int fanPulse = 1000;  // microseconds; expected range 1000–2000
+
+// ---------------- SAFETY STATE -----------------------
+unsigned long lastCommandTime = 0;
+const unsigned long COMMAND_TIMEOUT = 50; // Reduced to 50ms for faster response
+bool hasReceivedCommand = false;
+
+// ---------------- DEBUG SETTINGS --------------------
+#define DEBUG_MODE false  // Set to true to enable Serial prints (slows down processing)
+
+// ---------------- HELPER: MOTOR SPEED SET -------------------
+void setMotorSpeed(Adafruit_DCMotor *motor, float velocity) {
+  // Clamp velocity to -1.0 to 1.0 range
+  if (velocity > 1.0) velocity = 1.0;
+  if (velocity < -1.0) velocity = -1.0;
+
+  int speed = int(fabs(velocity) * MAX_SPEED);
+
+  if (velocity > 0) {
+    motor->run(FORWARD);
+  } else if (velocity < 0) {
+    motor->run(BACKWARD);
+  } else {
+    motor->run(RELEASE);
+  }
+
+  motor->setSpeed(speed);
+
+  #if DEBUG_MODE
+    Serial.print("Speed: ");
+    Serial.print(speed);
+    Serial.print(" Dir: ");
+    Serial.println(velocity > 0 ? "FWD" : (velocity < 0 ? "BWD" : "STOP"));
+  #endif
+}
+
+// ---------------- HELPER: FAN SET -------------------
+void setFanPulse(int pulse) {
+  // Clamp to typical ESC range
+  if (pulse < 1000) pulse = 1000;
+  if (pulse > 2000) pulse = 2000;
+  fanPulse = pulse;
+  esc.writeMicroseconds(fanPulse);
+  #if DEBUG_MODE
+    Serial.print("Fan pulse set to: ");
+    Serial.println(fanPulse);
+  #endif
+}
+
+// ===================== SETUP ========================
 void setup() {
   Serial.begin(9600);
+  delay(1000); // Give serial time to initialize
 
-  // Connect to Wi-Fi
+  // 1. Setup Motors
+  AFMS.begin();
+
+  // 2. Setup ESC
+  esc.attach(10);
+  esc.writeMicroseconds(1000);
+
+  // 3. Connect to Wi-Fi
   WiFi.begin(ssid, password);
   Serial.print("Connecting to Wi-Fi");
   while (WiFi.status() != WL_CONNECTED) {
@@ -27,31 +96,106 @@ void setup() {
   Serial.print("Connected! IP: ");
   Serial.println(WiFi.localIP());
 
-  // Start UDP
+  // 4. Start UDP
   udp.begin(localUdpPort);
-  Serial.print("UDP bound on port ");
+  Serial.print("Listening for UDP commands on port ");
   Serial.println(localUdpPort);
+
+  // Arming delay for ESC
+  delay(3000);
+  Serial.println("Ready!");
 }
 
+// ====================== LOOP ========================
 void loop() {
-  unsigned long now = millis();
+  // Fast packet processing - check for packets
+  int packetSize = udp.parsePacket();
 
-  // Send heartbeat every 100ms
-  if (now - lastHeartbeat >= 100) {
-    lastHeartbeat = now;
-    heartbeatCounter++;
+  if (packetSize > 0) {
+    // Discard any queued packets; keep only the latest
+    while (udp.parsePacket() > 0) {
+      udp.read(packetBuffer, 255);
+    }
 
-    // Broadcast heartbeat to local network
-    udp.beginPacket(IPAddress(255, 255, 255, 255), localUdpPort);
-    char buf[32];
-    sprintf(buf, "HB %lu", heartbeatCounter);
-    udp.write(buf);
-    udp.endPacket();
+    // Read the latest packet
+    int len = udp.read(packetBuffer, 255);
+    if (len > 0) {
+      packetBuffer[len] = 0; // Null-terminate string
+    }
 
-    // Local print
-    Serial.print("Heartbeat sent: ");
-    Serial.println(heartbeatCounter);
+    // Parse the packet
+    if (strncmp(packetBuffer, "CMD", 3) == 0) {
+      float v1 = 0.0, v2 = 0.0, v3 = 0.0;
+      bool parseSuccess = false;
+
+      // Make a copy for strtok (strtok modifies the string)
+      char bufferCopy[255];
+      strncpy(bufferCopy, packetBuffer, sizeof(bufferCopy));
+      bufferCopy[sizeof(bufferCopy) - 1] = 0;
+
+      char *token = strtok(bufferCopy, " ");
+      if (token && strcmp(token, "CMD") == 0) {
+        token = strtok(NULL, " ");
+        if (token) {
+          v1 = atof(token);
+          token = strtok(NULL, " ");
+          if (token) {
+            v2 = atof(token);
+            token = strtok(NULL, " \n\r");
+            if (token) {
+              v3 = atof(token);
+              parseSuccess = true;
+            }
+          }
+        }
+      }
+
+      if (parseSuccess) {
+        lastCommandTime = millis();
+        hasReceivedCommand = true;
+
+        #if DEBUG_MODE
+          Serial.print("V1: ");
+          Serial.print(v1);
+          Serial.print(" | V2: ");
+          Serial.print(v2);
+          Serial.print(" | V3: ");
+          Serial.println(v3);
+        #endif
+
+        setMotorSpeed(wheel1, v1);
+        setMotorSpeed(wheel2, v2);
+        setMotorSpeed(wheel3, v3);
+      }
+    }
+    else if (strncmp(packetBuffer, "FAN", 3) == 0) {
+      // FAN command expects: "FAN <int>"
+      int fanVal = fanPulse; // default to current
+      bool parseSuccess = false;
+
+      char bufferCopy[255];
+      strncpy(bufferCopy, packetBuffer, sizeof(bufferCopy));
+      bufferCopy[sizeof(bufferCopy) - 1] = 0;
+
+      char *token = strtok(bufferCopy, " ");
+      if (token && strcmp(token, "FAN") == 0) {
+        token = strtok(NULL, " \n\r");
+        if (token) {
+          fanVal = atoi(token);
+          parseSuccess = true;
+        }
+      }
+
+      if (parseSuccess) {
+        setFanPulse(fanVal);
+      }
+    }
   }
 
-  delay(10);
+  // Fast safety timeout check for motors
+  if (hasReceivedCommand && (millis() - lastCommandTime > COMMAND_TIMEOUT)) {
+    wheel1->run(RELEASE);
+    wheel2->run(RELEASE);
+    wheel3->run(RELEASE);
+  }
 }
