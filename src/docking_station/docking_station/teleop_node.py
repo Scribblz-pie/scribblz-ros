@@ -3,6 +3,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
 from geometry_msgs.msg import Twist
+from std_msgs.msg import String
 import math
 
 class TeleopNode(Node):
@@ -17,17 +18,12 @@ class TeleopNode(Node):
         self.declare_parameter('max_velocity', 1.0)
         self.max_velocity = self.get_parameter('max_velocity').get_parameter_value().double_value
         
-        # Publisher for motor velocities (v1, v2, v3)
-        # Using Twist: linear.x=v1, linear.y=v2, linear.z=v3
-        # Queue size 1 to prevent buffering old messages
         self.motor_publisher = self.create_publisher(
             Twist,
-            '/cmd_vel',
+            '/teleop/cmd_vel',
             1
         )
         
-        # Subscriber for joystick input
-        # Queue size 1 to only process latest message
         self.joy_subscriber = self.create_subscription(
             Joy,
             '/joy',
@@ -35,7 +31,16 @@ class TeleopNode(Node):
             1
         )
         
-        self.get_logger().info(f'Teleop node initialized with base_length={self.base_length}m')
+        self.state_subscriber = self.create_subscription(
+            String,
+            '/robot_state',
+            self.state_callback,
+            10
+        )
+        
+        self.current_state = 'docked'
+        
+        self.get_logger().info(f'teleop node initialized with base_length={self.base_length}m')
     
     def inverse_kinematics(self, x, y, psi):
         """
@@ -55,6 +60,9 @@ class TeleopNode(Node):
         v2 = -0.5 * y - (math.sqrt(3) / 2.0) * x + l * psi
         v3 = -0.5 * y + (math.sqrt(3) / 2.0) * x + l * psi
         return v1, v2, v3
+    
+    def state_callback(self, msg):
+        self.current_state = msg.data
     
     def joy_callback(self, msg):
         """
@@ -87,18 +95,11 @@ class TeleopNode(Node):
         # Publish motor velocities as Twist message
         # Using linear.x, linear.y, linear.z for v1, v2, v3
         twist_msg = Twist()
-        twist_msg.linear.x = v1
-        twist_msg.linear.y = v2
-        twist_msg.linear.z = v3
-        
-        self.motor_publisher.publish(twist_msg)
-        
-        # Debug logging (can be removed or set to debug level)
-        self.get_logger().debug(
-            f'Joy: LR={strafe_left_right:.2f}, UD={strafe_up_down:.2f}, rot_L={rotate_left}, rot_R={rotate_right} | '
-            f'Vel: x={x_vel:.2f}, y={y_vel:.2f}, psi={psi_vel:.2f} | '
-            f'Motors: v1={v1:.2f}, v2={v2:.2f}, v3={v3:.2f}'
-        )
+        if self.current_state == 'teleop':
+            twist_msg.linear.x = v1
+            twist_msg.linear.y = v2
+            twist_msg.linear.z = v3
+            self.motor_publisher.publish(twist_msg)
 
 def main(args=None):
     rclpy.init(args=args)

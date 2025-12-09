@@ -1,0 +1,10 @@
+# Goal
+---
+# Result
+bool success
+geometry_msgs/Point final_position
+---
+# Feedback
+float64 distance_to_dock
+geometry_msgs/Point current_position
+

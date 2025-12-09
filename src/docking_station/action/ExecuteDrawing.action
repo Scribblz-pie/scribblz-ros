@@ -1,0 +1,11 @@
+# Goal
+DrawingPath path
+---
+# Result
+bool success
+float64 completion_time
+---
+# Feedback
+uint32 current_waypoint_index
+float64 progress
+
