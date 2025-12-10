@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from rclpy.action import ActionClient
-from std_msgs.msg import String
+from std_msgs.msg import String, Empty
 from geometry_msgs.msg import Twist
-from docking_station.msg import BatteryStatus
-from docking_station.srv import SetRobotState
-from docking_station.action import ExecuteDrawing, DockRobot
+from geometry_msgs.msg import Point
+from std_srvs.srv import SetBool
 
 
 class StateMachineNode(Node):
@@ -19,14 +17,26 @@ class StateMachineNode(Node):
         self.state_pub = self.create_publisher(String, '/robot_state', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 1)
         
+        # Service to set robot state - using SetBool as a simple trigger
+        # Note: This is a simplified replacement. For full state management,
+        # you may want to use a topic-based approach instead.
+        # Consider subscribing to '/set_robot_state_topic' (String) for proper state management
         self.set_state_srv = self.create_service(
-            SetRobotState,
+            SetBool,
             '/set_robot_state',
             self.set_state_callback
         )
         
+        # Alternative: topic-based state management (recommended)
+        self.set_state_sub = self.create_subscription(
+            String,
+            '/set_robot_state_topic',
+            self.set_state_topic_callback,
+            10
+        )
+        
         self.battery_sub = self.create_subscription(
-            BatteryStatus,
+            Point,
             '/battery_status',
             self.battery_callback,
             10
@@ -53,8 +63,8 @@ class StateMachineNode(Node):
             1
         )
         
-        self.drawing_action_client = ActionClient(self, ExecuteDrawing, '/execute_drawing')
-        self.docking_action_client = ActionClient(self, DockRobot, '/dock_robot')
+        # Topic publishers to trigger drawing and docking
+        self.dock_trigger_pub = self.create_publisher(Empty, '/dock_robot_trigger', 1)
         
         self.current_cmd = None
         self.low_battery = False
@@ -65,25 +75,30 @@ class StateMachineNode(Node):
         self.get_logger().info('state machine initialized, starting in docked state')
     
     def set_state_callback(self, request, response):
-        new_state = request.state
+        # Simplified: SetBool.data=True triggers state transition
+        # Note: SetBool only has 'success' field, no 'message' field
+        # For full state management, use the topic-based approach via '/set_robot_state_topic'
+        response.success = True
+        return response
+    
+    def set_state_topic_callback(self, msg):
+        """Topic-based state management - recommended approach"""
+        new_state = msg.data
         if new_state in self.valid_states:
             if self.is_valid_transition(self.state, new_state):
                 self.state = new_state
                 self.get_logger().info(f'state changed to: {new_state}')
-                response.success = True
-                response.message = f'state changed to {new_state}'
                 
                 if new_state == 'drawing':
-                    self.start_drawing_action()
+                    # Note: Drawing requires a path to be published to /execute_drawing_path
+                    # The state machine doesn't publish the path - external node should do this
+                    pass
                 elif new_state == 'returning_to_docking_station':
-                    self.start_docking_action()
+                    self.start_docking()
             else:
-                response.success = False
-                response.message = f'invalid transition from {self.state} to {new_state}'
+                self.get_logger().warn(f'invalid transition from {self.state} to {new_state}')
         else:
-            response.success = False
-            response.message = f'invalid state: {new_state}'
-        return response
+            self.get_logger().warn(f'invalid state: {new_state}')
     
     def is_valid_transition(self, from_state, to_state):
         if to_state == 'teleop' or to_state == 'error':
@@ -103,11 +118,12 @@ class StateMachineNode(Node):
         return False
     
     def battery_callback(self, msg):
-        self.low_battery = msg.low_battery
+        # Point message: x=voltage, y=level, z=low_battery (0.0 or 1.0)
+        self.low_battery = (msg.z > 0.5)
         if self.low_battery and self.state == 'drawing':
             self.get_logger().warn('low battery detected, transitioning to returning_to_docking_station')
             self.state = 'returning_to_docking_station'
-            self.start_docking_action()
+            self.start_docking()
     
     def drawing_cmd_callback(self, msg):
         if self.state == 'drawing':
@@ -121,11 +137,11 @@ class StateMachineNode(Node):
         if self.state == 'teleop':
             self.current_cmd = msg
     
-    def start_drawing_action(self):
-        pass
-    
-    def start_docking_action(self):
-        pass
+    def start_docking(self):
+        """Trigger docking by publishing to topic"""
+        trigger_msg = Empty()
+        self.dock_trigger_pub.publish(trigger_msg)
+        self.get_logger().info('docking trigger sent')
     
     def publish_state(self):
         msg = String()

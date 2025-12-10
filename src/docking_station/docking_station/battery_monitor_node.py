@@ -2,7 +2,7 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float64
-from docking_station.msg import BatteryStatus
+from geometry_msgs.msg import Point
 
 
 class BatteryMonitorNode(Node):
@@ -27,7 +27,7 @@ class BatteryMonitorNode(Node):
         )
         
         self.status_pub = self.create_publisher(
-            BatteryStatus,
+            Point,
             '/battery_status',
             10
         )
@@ -40,10 +40,11 @@ class BatteryMonitorNode(Node):
         level = max(0.0, min(1.0, level))
         low_battery = level < self.low_threshold
         
-        status = BatteryStatus()
-        status.voltage = voltage
-        status.level = level
-        status.low_battery = low_battery
+        # Use Point message: x=voltage, y=level, z=low_battery (0.0 or 1.0)
+        status = Point()
+        status.x = voltage
+        status.y = level
+        status.z = 1.0 if low_battery else 0.0
         
         self.status_pub.publish(status)
 
