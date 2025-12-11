@@ -33,7 +33,7 @@ setup(
             'battery_monitor = docking_station.battery_monitor_node:main',
             'drawing_action_server = docking_station.drawing_action_server_node:main',
             'docking_action_server = docking_station.docking_action_server_node:main',
-            'lidar_pose = docking_station.lidar_pose_node:main',
+            'lidar_pose = docking_station.lidar.lidar_node:main',
         ],
     },
 )
