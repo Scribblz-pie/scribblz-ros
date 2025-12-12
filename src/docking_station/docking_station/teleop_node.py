@@ -24,6 +24,12 @@ class TeleopNode(Node):
             1
         )
         
+        self.cmd_vel_publisher = self.create_publisher(
+            Twist,
+            '/cmd_vel',
+            1
+        )
+        
         self.joy_subscriber = self.create_subscription(
             Joy,
             '/joy',
@@ -100,6 +106,7 @@ class TeleopNode(Node):
             twist_msg.linear.y = v2
             twist_msg.linear.z = v3
             self.motor_publisher.publish(twist_msg)
+            self.cmd_vel_publisher.publish(twist_msg)
 
 def main(args=None):
     rclpy.init(args=args)
