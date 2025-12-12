@@ -3,7 +3,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
 import math
 
 class TeleopNode(Node):
@@ -18,6 +18,10 @@ class TeleopNode(Node):
         self.declare_parameter('max_velocity', 1.0)
         self.max_velocity = self.get_parameter('max_velocity').get_parameter_value().double_value
         
+        # Separate scale for angular velocity to allow stronger turning
+        self.declare_parameter('angular_scale', 10.0)
+        self.angular_scale = self.get_parameter('angular_scale').get_parameter_value().double_value
+        
         self.motor_publisher = self.create_publisher(
             Twist,
             '/teleop/cmd_vel',
@@ -27,6 +31,12 @@ class TeleopNode(Node):
         self.cmd_vel_publisher = self.create_publisher(
             Twist,
             '/cmd_vel',
+            1
+        )
+
+        self.marker_publisher = self.create_publisher(
+            Bool,
+            '/marker',
             1
         )
         
@@ -47,6 +57,10 @@ class TeleopNode(Node):
         self.current_state = 'docked'
         
         self.get_logger().info(f'teleop node initialized with base_length={self.base_length}m')
+        
+        # Parameter to select which Joy button drives the marker (e.g. keyboard "i")
+        self.declare_parameter('marker_button_index', 4)
+        self.marker_button_index = self.get_parameter('marker_button_index').get_parameter_value().integer_value
     
     def inverse_kinematics(self, x, y, psi):
         """
@@ -78,6 +92,7 @@ class TeleopNode(Node):
         - axes[1]: 1 = up, -1 = down (strafe)
         - buttons[3]: 1 = rotate left
         - buttons[1]: 1 = rotate right
+        - buttons[marker_button_index]: 1 = marker down (True), 0 = marker up (False)
         """
         # Extract joystick values
         strafe_left_right = msg.axes[0] if len(msg.axes) > 0 else 0.0  # 1=left, -1=right
@@ -93,7 +108,7 @@ class TeleopNode(Node):
         x_vel = strafe_up_down * self.max_velocity     # forward/backward (positive = forward)
         
         # Angular velocity: rotate_left = -1, rotate_right = +1 (uses same scale as linear)
-        psi_vel = (rotate_right - rotate_left) * self.max_velocity
+        psi_vel = (rotate_right - rotate_left) * self.max_velocity * self.angular_scale
         
         # Apply inverse kinematics
         v1, v2, v3 = self.inverse_kinematics(x_vel, y_vel, psi_vel)
@@ -107,6 +122,14 @@ class TeleopNode(Node):
             twist_msg.linear.z = v3
             self.motor_publisher.publish(twist_msg)
             self.cmd_vel_publisher.publish(twist_msg)
+
+        # Publish marker state (True when the configured button is pressed)
+        marker_msg = Bool()
+        marker_pressed = False
+        if self.marker_button_index < len(msg.buttons):
+            marker_pressed = msg.buttons[self.marker_button_index] == 1
+        marker_msg.data = marker_pressed
+        self.marker_publisher.publish(marker_msg)
 
 def main(args=None):
     rclpy.init(args=args)
