@@ -53,22 +53,43 @@ def generate_launch_description():
         }]
     )
 
-    # Drawing action server node
-    drawing_action_server_node = Node(
+    # Waypoint publisher node
+    waypoint_publisher_node = Node(
         package='docking_station',
-        executable='drawing_action_server',
-        name='drawing_action_server',
+        executable='waypoint_publisher',
+        name='waypoint_publisher',
+        output='screen',
+        parameters=[{
+            'waypoints_file': 'waypoints.json',
+            'watch_file': True,
+            'poll_interval': 1.0
+        }]
+    )
+
+    # Drawing control node
+    drawing_control_node = Node(
+        package='docking_station',
+        executable='drawing_control',
+        name='drawing_control',
         output='screen',
         parameters=[{
             'waypoint_tolerance': 0.05,
             'max_linear_vel': 0.3,
-            'max_angular_vel': 0.5,
+            'kp': 2.0,
             'control_frequency': 20.0,
-            'target_fan_speed': 255,
-            'fan_ramp_steps': 10,
-            'fan_ramp_delay': 0.1,
-            'imu_reset_topic': '/imu/reset',
-            'initialization_timeout': 5.0
+            'obstacle_threshold': 0.15
+        }]
+    )
+
+    # Drawing driver node
+    drawing_driver_node = Node(
+        package='docking_station',
+        executable='drawing_driver',
+        name='drawing_driver',
+        output='screen',
+        parameters=[{
+            'waypoints_file': 'waypoints.json',
+            'use_imu': True
         }]
     )
 
@@ -116,7 +137,9 @@ def generate_launch_description():
         foxglove_node,
         state_machine_node,
         battery_monitor_node,
-        drawing_action_server_node,
+        waypoint_publisher_node,
+        drawing_control_node,
+        drawing_driver_node,
         docking_action_server_node,
         lidar_pose_node
     ])

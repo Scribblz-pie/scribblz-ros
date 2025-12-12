@@ -34,6 +34,9 @@ setup(
             'drawing_action_server = docking_station.drawing_action_server_node:main',
             'docking_action_server = docking_station.docking_action_server_node:main',
             'lidar_pose = docking_station.lidar_pose_node:main',
+            'waypoint_publisher = docking_station.waypoint_publisher_node:main',
+            'drawing_control = docking_station.drawing_control_node:main',
+            'drawing_driver = docking_station.drawing_driver_node:main',
         ],
     },
 )

@@ -42,13 +42,6 @@ class StateMachineNode(Node):
             10
         )
         
-        self.drawing_cmd_sub = self.create_subscription(
-            Twist,
-            '/drawing/cmd_vel',
-            self.drawing_cmd_callback,
-            1
-        )
-        
         self.docking_cmd_sub = self.create_subscription(
             Twist,
             '/docking/cmd_vel',
@@ -125,10 +118,6 @@ class StateMachineNode(Node):
             self.state = 'returning_to_docking_station'
             self.start_docking()
     
-    def drawing_cmd_callback(self, msg):
-        if self.state == 'drawing':
-            self.current_cmd = msg
-    
     def docking_cmd_callback(self, msg):
         if self.state == 'returning_to_docking_station':
             self.current_cmd = msg
@@ -149,11 +138,17 @@ class StateMachineNode(Node):
         self.state_pub.publish(msg)
     
     def timer_callback(self):
-        if self.state == 'docked' or self.state == 'error':
-            cmd = Twist()
-            self.cmd_vel_pub.publish(cmd)
-            self.current_cmd = None
+        # Note: Drawing commands are published directly to /cmd_vel by drawing_driver_node
+        # State machine only routes teleop and docking commands
+        if self.state == 'docked' or self.state == 'error' or self.state == 'drawing':
+            # For drawing state, driver node handles commands directly
+            # For docked/error, stop robot
+            if self.state != 'drawing':
+                cmd = Twist()
+                self.cmd_vel_pub.publish(cmd)
+                self.current_cmd = None
         elif self.current_cmd is not None:
+            # Route teleop or docking commands
             self.cmd_vel_pub.publish(self.current_cmd)
         else:
             cmd = Twist()
