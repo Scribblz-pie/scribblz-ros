@@ -58,6 +58,7 @@ class DrawingActionServerNode(Node):
         self.cmd_vel_pub = self.create_publisher(Twist, '/drawing/cmd_vel', 1)
         self.fan_pub = self.create_publisher(Int32, '/fan_speed', 1)
         self.imu_reset_pub = self.create_publisher(Empty, self.imu_reset_topic, 1)
+        self.marker_pub = self.create_publisher(Bool, '/marker', 1)
         
         # Feedback publishers
         self.progress_pub = self.create_publisher(Float64, '/drawing/feedback/progress', 1)
@@ -81,6 +82,10 @@ class DrawingActionServerNode(Node):
     
     def cancel_callback(self, msg):
         self.cancel_requested = True
+        # Raise marker when cancelled
+        marker_up = Bool()
+        marker_up.data = False
+        self.marker_pub.publish(marker_up)
         self.get_logger().info('drawing cancellation requested')
     
     def path_callback(self, msg):
@@ -129,6 +134,11 @@ class DrawingActionServerNode(Node):
         
         # wait for fan to stabilize
         rclpy.spin_once(self, timeout_sec=0.5)
+        
+        # Marker down for drawing
+        marker_down = Bool()
+        marker_down.data = True
+        self.marker_pub.publish(marker_down)
         
         self.get_logger().info('initialization complete')
         return True
@@ -208,6 +218,11 @@ class DrawingActionServerNode(Node):
         time_msg = Float64()
         time_msg.data = completion_time
         self.completion_time_pub.publish(time_msg)
+        
+        # Raise marker when done or cancelled
+        marker_up = Bool()
+        marker_up.data = False
+        self.marker_pub.publish(marker_up)
         
         self.executing = False
         self.current_path = None

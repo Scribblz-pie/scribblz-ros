@@ -53,19 +53,6 @@ def generate_launch_description():
         }]
     )
 
-    # Waypoint publisher node
-    waypoint_publisher_node = Node(
-        package='docking_station',
-        executable='waypoint_publisher',
-        name='waypoint_publisher',
-        output='screen',
-        parameters=[{
-            'waypoints_file': 'waypoints.json',
-            'watch_file': True,
-            'poll_interval': 1.0
-        }]
-    )
-
     # Drawing control node
     drawing_control_node = Node(
         package='docking_station',
@@ -91,6 +78,14 @@ def generate_launch_description():
             'waypoints_file': 'waypoints.json',
             'use_imu': True
         }]
+    )
+
+    # Image to path node
+    image_to_path_node = Node(
+        package='docking_station',
+        executable='image_to_path',
+        name='image_to_path',
+        output='screen'
     )
 
     # Docking action server node
@@ -137,9 +132,9 @@ def generate_launch_description():
         foxglove_node,
         state_machine_node,
         battery_monitor_node,
-        waypoint_publisher_node,
         drawing_control_node,
         drawing_driver_node,
+        image_to_path_node,
         docking_action_server_node,
         lidar_pose_node
     ])

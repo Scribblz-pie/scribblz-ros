@@ -3,7 +3,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
 import math
 
 class TeleopNode(Node):
@@ -18,9 +18,19 @@ class TeleopNode(Node):
         self.declare_parameter('max_velocity', 1.0)
         self.max_velocity = self.get_parameter('max_velocity').get_parameter_value().double_value
         
+        # Parameter to select which Joy button drives the marker (e.g. keyboard "i")
+        self.declare_parameter('marker_button_index', 4)
+        self.marker_button_index = self.get_parameter('marker_button_index').get_parameter_value().integer_value
+        
         self.motor_publisher = self.create_publisher(
             Twist,
             '/teleop/cmd_vel',
+            1
+        )
+        
+        self.marker_publisher = self.create_publisher(
+            Bool,
+            '/marker',
             1
         )
         
@@ -100,6 +110,14 @@ class TeleopNode(Node):
             twist_msg.linear.y = v2
             twist_msg.linear.z = v3
             self.motor_publisher.publish(twist_msg)
+        
+        # Publish marker state (True when the configured button is pressed)
+        marker_msg = Bool()
+        marker_pressed = False
+        if self.marker_button_index < len(msg.buttons):
+            marker_pressed = msg.buttons[self.marker_button_index] == 1
+        marker_msg.data = marker_pressed
+        self.marker_publisher.publish(marker_msg)
 
 def main(args=None):
     rclpy.init(args=args)

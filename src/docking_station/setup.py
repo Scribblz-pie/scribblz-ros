@@ -14,7 +14,7 @@ setup(
         ('share/' + package_name + '/launch', glob('launch/*.py')),
     ],
 
-    install_requires=['setuptools'],
+    install_requires=['setuptools', 'tf-transformations', 'opencv-python'],
     zip_safe=True,
     maintainer='david',
     maintainer_email='david@todo.todo',
@@ -34,9 +34,9 @@ setup(
             'drawing_action_server = docking_station.drawing_action_server_node:main',
             'docking_action_server = docking_station.docking_action_server_node:main',
             'lidar_pose = docking_station.lidar_pose_node:main',
-            'waypoint_publisher = docking_station.waypoint_publisher_node:main',
             'drawing_control = docking_station.drawing_control_node:main',
             'drawing_driver = docking_station.drawing_driver_node:main',
+            'image_to_path = docking_station.image_to_path_node:main',
         ],
     },
 )
