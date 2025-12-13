@@ -5,7 +5,10 @@ from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Image
 import cv2
 import numpy as np
+if not hasattr(np, 'float'):
+    np.float = float
 import tempfile
+import os
 import math
 from typing import List
 

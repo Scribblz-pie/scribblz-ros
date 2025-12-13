@@ -1,41 +1,74 @@
-#!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-import cv_bridge
+from cv_bridge import CvBridge
 import cv2
 import sys
+import time
 
-class ImagePublisher(Node):
+class SingleImagePublisher(Node):
     def __init__(self, image_path):
-        super().__init__('image_publisher')
+        super().__init__('single_image_uploader')
+        
+        # Create a "Latched" profile (Reliable + Transient Local)
+        # This guarantees delivery even if the subscriber joins LATE.
         qos_profile = QoSProfile(
-        reliability=ReliabilityPolicy.RELIABLE,  # <--- CHANGED from BEST_EFFORT
-        history=HistoryPolicy.KEEP_LAST,
-        depth=1
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,  # <--- THE FIX
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
         )
+
         self.publisher_ = self.create_publisher(Image, 'uploaded_image', qos_profile=qos_profile)
-        self.bridge = cv_bridge.CvBridge()
+        self.bridge = CvBridge()
+        self.image_path = image_path
         
-        # Load and publish the image
-        img = cv2.imread(image_path)
+        # 2. Use a timer to publish ONCE after a short delay
+        # (Giving the node 1 second to set up connections before sending)
+        self.timer = self.create_timer(1.0, self.publish_once_callback)
+        self.has_published = False
+
+    def publish_once_callback(self):
+        if self.has_published:
+            return  # Do nothing if already published
+
+        # Load and process image
+        img = cv2.imread(self.image_path)
         if img is None:
-            self.get_logger().error(f'Could not load image from {image_path}')
-            return
+            self.get_logger().error(f"Could not read image: {self.image_path}")
+            sys.exit(1)
+
+        # Convert and Publish
+        msg = self.bridge.cv2_to_imgmsg(img, encoding="bgr8")
+        msg.header.frame_id = "map"
         
-        ros_image = self.bridge.cv2_to_imgmsg(img, encoding='bgr8')
-        self.publisher_.publish(ros_image)
-        self.get_logger().info(f'Published image from {image_path} to /uploaded_image')
+        self.publisher_.publish(msg)
+        self.get_logger().info(f"Successfully published: {self.image_path}")
+        
+        # Mark as done so we don't publish again
+        self.has_published = True
+        
+        # OPTIONAL: You can destroy the timer now to save resources
+        self.timer.cancel()
 
 def main(args=None):
-    if len(sys.argv) < 2:
-        print("Usage: python image_publisher.py <image_path>")
-        return
-    
-    image_path = sys.argv[1]
     rclpy.init(args=args)
-    node = ImagePublisher(image_path)
+    
+    # Get filename from command line
+    if len(sys.argv) < 2:
+        print("Usage: python3 image_publisher.py <image_file>")
+        return
+
+    node = SingleImagePublisher(sys.argv[1])
+
+    print("Node running. Press Ctrl+C to stop.")
+    
+    # 3. SPIN: Keep the script alive so the image remains available
+    # The script will hang here, which is what we want.
+    rclpy.spin(node)
+
+    node.destroy_node()
     rclpy.shutdown()
 
 if __name__ == '__main__':
