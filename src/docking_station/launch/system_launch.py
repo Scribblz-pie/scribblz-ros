@@ -28,6 +28,10 @@ def generate_launch_description():
         executable='foxglove_bridge',
         name='foxglove_bridge',
         output='screen',
+        parameters=[{
+        'topic_whitelist': ['.*'],  # Subscribe to ALL topics
+        # Or remove the best_effort line if you want reliable QoS
+    }],
         arguments=['--ros-args', '--log-level', 'info']
     )
 
@@ -102,29 +106,29 @@ def generate_launch_description():
         }]
     )
 
-    #lidar_pose_node = Node(
-    #    package='docking_station',
-    #    executable='lidar_pose',
-    #    name='lidar_pose',
-    #    output='screen',
-    #    parameters=[{
-    #        'host': '0.0.0.0',
-    #        'port': 6794,
-    #        'angle_tolerance': 0.05,
-    #        'start_filter_angle': 0.0,
-    #        'end_filter_angle': 360.0,
-    #        'frame_id': 'map',
-    #        'scan_frame_id': 'lidar',
-    #        'print_interval': 2.0,
-    #        'expected_radius_cm': 3.0,
-    #        'radius_tolerance_cm': 5.0,
-    #        'min_circle_points': 3,
-    #        'ransac_iterations': 50,
-    #        'inlier_threshold_cm': 2.0,
-    #        'min_detection_distance_cm': 5.0,
-    #        'max_detection_distance_cm': 500.0
-    #    }]
-    #)
+    lidar_pose_node = Node(
+        package='docking_station',
+        executable='lidar_pose',
+        name='lidar_pose',
+        output='screen',
+        parameters=[{
+            'host': '0.0.0.0',
+            'port': 6794,
+            'angle_tolerance': 0.05,
+            'start_filter_angle': 0.0,
+            'end_filter_angle': 360.0,
+            'frame_id': 'map',
+            'scan_frame_id': 'lidar',
+            'print_interval': 2.0,
+            'expected_radius_cm': 3.0,
+            'radius_tolerance_cm': 5.0,
+            'min_circle_points': 3,
+            'ransac_iterations': 50,
+            'inlier_threshold_cm': 2.0,
+            'min_detection_distance_cm': 5.0,
+            'max_detection_distance_cm': 500.0
+        }]
+    )
 
     return LaunchDescription([
         teleop_node,
@@ -136,6 +140,5 @@ def generate_launch_description():
         drawing_driver_node,
         image_to_path_node,
         docking_action_server_node,
-        #lidar_pose_node
+        lidar_pose_node
     ])
-
