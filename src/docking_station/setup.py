@@ -35,10 +35,6 @@ setup(
             'drawing_action_server = docking_station.drawing_action_server_node:main',
             'docking_action_server = docking_station.docking_action_server_node:main',
             'lidar_pose = docking_station.lidar.lidar_node:main',
-            'drawing_control = docking_station.drawing_control_node:main',
-            'drawing_driver = docking_station.drawing_driver_node:main',
-            'image_to_path = docking_station.image_to_path_node:main',
-            'dead_reckoning = docking_station.dead_reckoning_odom:main',
         ],
     },
 )

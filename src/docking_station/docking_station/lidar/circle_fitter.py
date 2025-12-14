@@ -204,3 +204,4 @@ class CircleFitter:
                         best_fit = (*refined_fit, inlier_count)
 
         return best_fit
+

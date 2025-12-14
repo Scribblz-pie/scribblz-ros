@@ -3,7 +3,6 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String
 from std_msgs.msg import String, Bool
 import math
 
@@ -23,12 +22,16 @@ class TeleopNode(Node):
         self.declare_parameter('angular_scale', 10.0)
         self.angular_scale = self.get_parameter('angular_scale').get_parameter_value().double_value
         
+        # Separate scale for angular velocity to allow stronger turning
+        self.declare_parameter('angular_scale', 10.0)
+        self.angular_scale = self.get_parameter('angular_scale').get_parameter_value().double_value
+        
         self.motor_publisher = self.create_publisher(
             Twist,
             '/teleop/cmd_vel',
             1
         )
-
+        
         self.cmd_vel_publisher = self.create_publisher(
             Twist,
             '/cmd_vel',
@@ -40,7 +43,7 @@ class TeleopNode(Node):
             '/marker',
             1
         )
-
+        
         self.joy_subscriber = self.create_subscription(
             Joy,
             '/joy',
@@ -62,7 +65,7 @@ class TeleopNode(Node):
         # Parameter to select which Joy button drives the marker (e.g. keyboard "i")
         self.declare_parameter('marker_button_index', 4)
         self.marker_button_index = self.get_parameter('marker_button_index').get_parameter_value().integer_value
-
+    
     def inverse_kinematics(self, x, y, psi):
         """
         Convert global velocities (x, y, psi) to motor velocities (v1, v2, v3)
@@ -109,9 +112,8 @@ class TeleopNode(Node):
         x_vel = strafe_up_down * self.max_velocity     # forward/backward (positive = forward)
 
         # Angular velocity: rotate_left = -1, rotate_right = +1 (uses same scale as linear)
-        psi_vel = (rotate_right - rotate_left) * self.max_velocity
         psi_vel = (rotate_right - rotate_left) * self.max_velocity * self.angular_scale
-
+        
         # Apply inverse kinematics
         v1, v2, v3 = self.inverse_kinematics(x_vel, y_vel, psi_vel)
 

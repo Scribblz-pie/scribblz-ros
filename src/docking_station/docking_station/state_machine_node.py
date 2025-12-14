@@ -65,6 +65,16 @@ class StateMachineNode(Node):
         self.current_cmd = None
         self.low_battery = False
         
+        # Subscribe to /robot_state to accept manual state changes
+        # We'll ignore messages that match our current state (likely our own publishes)
+        # and only process messages that are different (external changes)
+        self.robot_state_sub = self.create_subscription(
+            String,
+            '/robot_state',
+            self.robot_state_callback,
+            10
+        )
+        
         self.timer = self.create_timer(0.1, self.timer_callback)
         self.state_timer = self.create_timer(1.0, self.publish_state)
         
@@ -130,6 +140,26 @@ class StateMachineNode(Node):
                 'requested_state': new_state,
                 'valid_states': self.valid_states
             })
+    
+    def robot_state_callback(self, msg):
+        """Handle manual state changes from /robot_state topic"""
+        new_state = msg.data
+        # Ignore messages that match our current state (likely our own publishes)
+        # Only process if it's different and valid
+        if new_state == self.state:
+            return  # This is likely our own message, ignore it
+        
+        if new_state in self.valid_states:
+            if self.is_valid_transition(self.state, new_state):
+                self.state = new_state
+                self.get_logger().info(f'state changed to: {new_state} (from external /robot_state message)')
+                
+                if new_state == 'drawing':
+                    pass
+                elif new_state == 'returning_to_docking_station':
+                    self.start_docking()
+            else:
+                self.get_logger().warn(f'invalid transition from {self.state} to {new_state} (from external message)')
     
     def is_valid_transition(self, from_state, to_state):
         if to_state == 'teleop' or to_state == 'error':

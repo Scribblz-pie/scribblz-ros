@@ -2,8 +2,7 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Int32, Bool, Float64, Empty
-from sensor_msgs.msg import Imu
+from std_msgs.msg import Int32, Bool, Float64
 import socket
 import threading
 import math
@@ -22,7 +21,6 @@ class UDPCommandSender(Node):
         self.fan_msg_count = 0
         self.marker_msg_count = 0
         self.marker_angle_msg_count = 0
-        self.imu_msg_count = 0
         
         # Yaw integration state
         self.current_yaw = 0.0  # radians
@@ -43,6 +41,7 @@ class UDPCommandSender(Node):
             1
         )
         
+        # Subscriber for marker state (Boolean)
         self.marker_subscriber = self.create_subscription(
             Bool,
             '/marker',
@@ -50,6 +49,7 @@ class UDPCommandSender(Node):
             1
         )
         
+        # Subscriber for explicit marker angle commands (degrees 0-180)
         self.marker_angle_subscriber = self.create_subscription(
             Float64,
             '/marker_angle',
@@ -57,18 +57,7 @@ class UDPCommandSender(Node):
             1
         )
         
-        # === PUBLISHER (IMU data from Arduino) ===
-        self.imu_publisher = self.create_publisher(Imu, 'imu/data', 10)
-        
-        # === SUBSCRIBER (IMU reset command) ===
-        self.imu_reset_subscriber = self.create_subscription(
-            Empty,
-            '/imu/reset',
-            self.imu_reset_callback,
-            1
-        )
-        
-        # === UDP SOCKET SETUP ===
+        # Set up UDP socket for sending commands
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             
@@ -275,6 +264,44 @@ class UDPCommandSender(Node):
         self.running = False
         self.sock.close()
         super().destroy_node()
+
+    def marker_callback(self, msg: Bool):
+        """
+        Receive marker state and send via UDP to Arduino.
+        Format: "MARKER <0|1>" where 1 = down, 0 = up.
+        """
+        self.marker_msg_count += 1
+
+        marker_val = 1 if msg.data else 0
+        cmd_str = f"MARKER {marker_val}"
+        cmd_bytes = cmd_str.encode('utf-8')
+
+        try:
+            bytes_sent = self.sock.sendto(cmd_bytes, (ARDUINO_IP, UDP_PORT))
+            self.get_logger().info(
+                f'[marker #{self.marker_msg_count}] Sent "{cmd_str}" ({bytes_sent} bytes) to {ARDUINO_IP}:{UDP_PORT}'
+            )
+        except Exception as e:
+            self.get_logger().error(f'[marker #{self.marker_msg_count}] UDP send error: {e}')
+
+    def marker_angle_callback(self, msg: Float64):
+        """
+        Receive marker angle (degrees) and send via UDP to Arduino.
+        Format: "MARKER_ANGLE <deg>" where deg is typically 0-180.
+        """
+        self.marker_angle_msg_count += 1
+
+        angle_val = msg.data
+        cmd_str = f"MARKER_ANGLE {angle_val:.2f}"
+        cmd_bytes = cmd_str.encode('utf-8')
+
+        try:
+            bytes_sent = self.sock.sendto(cmd_bytes, (ARDUINO_IP, UDP_PORT))
+            self.get_logger().info(
+                f'[marker_angle #{self.marker_angle_msg_count}] Sent "{cmd_str}" ({bytes_sent} bytes) to {ARDUINO_IP}:{UDP_PORT}'
+            )
+        except Exception as e:
+            self.get_logger().error(f'[marker_angle #{self.marker_angle_msg_count}] UDP send error: {e}')
 
 def main(args=None):
     rclpy.init(args=args)

@@ -362,6 +362,11 @@ class DrawingActionServerNode(Node):
             self.executing = False
             return
         
+        # Marker down for drawing
+        marker_down = Bool()
+        marker_down.data = True
+        self.marker_pub.publish(marker_down)
+        
         start_time = time.time()
         current_waypoint_idx = 0
         dt = 1.0 / self.control_freq
@@ -584,6 +589,11 @@ class DrawingActionServerNode(Node):
             success_msg = Bool()
             success_msg.data = True
             self.success_pub.publish(success_msg)
+        
+        # Raise marker when done or cancelled
+        marker_up = Bool()
+        marker_up.data = False
+        self.marker_pub.publish(marker_up)
         
         time_msg = Float64()
         time_msg.data = completion_time

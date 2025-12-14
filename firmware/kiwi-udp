@@ -17,37 +17,8 @@ const char* password = "BestOval4Engineers!";
 
 // ---------------- UDP SETTINGS -----------------
 WiFiUDP udp;
-const unsigned int localUdpPort = 54322;
-char packetBuffer[255]; 
-
-// Track sender for telemetry
-IPAddress lastSenderIP;
-unsigned int lastSenderPort = 0;
-bool hasValidSender = false;
-
-// ---------------- HARDWARE PINOUT ----------------
-// Motor #1 (Front)
-#define M1_BIN1 A2
-#define M1_BIN2 A3
-#define M1_PWM  4   // D4
-
-// Motor #2 (Left Rear)
-#define M2_PWMA 3   // D3
-#define M2_AIN2 7   // D7
-#define M2_AIN1 8   // D8
-
-// Motor #3 (Right Rear)
-#define M3_BIN1 A1
-#define M3_BIN2 A0
-#define M3_PWM  5   // D5
-
-// ESC (Brushless Motor / Fan)
-#define ESC_PIN 6   // D6
-
-// ---------------- IMU SETTINGS -----------------
-MPU6050 accelgyro;
-int16_t ax, ay, az;
-int16_t gx, gy, gz;
+const unsigned int localUdpPort = 54322;  // must match ROS UDP_PORT
+char packetBuffer[255]; // Buffer to hold incoming packet
 
 const float ACCEL_SCALE_FACTOR = 16384.0;
 const float GYRO_SCALE_FACTOR = 131.0;
@@ -59,13 +30,21 @@ const unsigned long IMU_READ_INTERVAL = 10; // 10ms = 100Hz
 Servo esc;
 int fanPulse = 1000; 
 
-// ---------------- SAFETY STATE ----------------
+// ---------------- MARKER SERVO ------------------------
+Servo markerServo;
+const int MARKER_UP_ANGLE = 0;   // Servo angle for marker up (False)
+const int MARKER_DOWN_ANGLE = 160;  // Servo angle for marker down (True)
+
+// ---------------- SAFETY STATE -----------------------
 unsigned long lastCommandTime = 0;
 const unsigned long COMMAND_TIMEOUT = 50; 
 bool hasReceivedCommand = false;
 
-// ---------------- HELPER: SET TB6612FNG MOTOR ----------------
-void setMotorSpeed(int motorID, float velocity) {
+// ---------------- DEBUG SETTINGS --------------------
+#define DEBUG_MODE false  // Set to true to enable Serial prints (slows down processing)
+
+// ---------------- HELPER: MOTOR SPEED SET -------------------
+void setMotorSpeed(Adafruit_DCMotor *motor, float velocity) {
   if (velocity > 1.0) velocity = 1.0;
   if (velocity < -1.0) velocity = -1.0;
 
@@ -124,6 +103,17 @@ void readAndSendImu() {
   }
 }
 
+// ---------------- HELPER: MARKER SET ----------------
+void setMarkerAngle(int angleDeg) {
+  if (angleDeg < 0) angleDeg = 0;
+  if (angleDeg > 180) angleDeg = 180;
+  markerServo.write(angleDeg);
+  #if DEBUG_MODE
+    Serial.print("Marker angle set to: ");
+    Serial.println(angleDeg);
+  #endif
+}
+
 // ===================== SETUP ========================
 void setup() {
   Serial.begin(115200);
@@ -149,9 +139,11 @@ void setup() {
     while (true);
   }
 
-  Serial.print("Connecting to Wi-Fi: ");
-  Serial.println(ssid);
-  
+  // 3. Setup Marker Servo
+  markerServo.attach(8);
+  setMarkerAngle(MARKER_UP_ANGLE);  // Start with marker up
+
+  // 4. Connect to Wi-Fi
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
@@ -161,6 +153,7 @@ void setup() {
   Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
 
+  // 5. Start UDP
   udp.begin(localUdpPort);
   Serial.print("Listening on UDP port: ");
   Serial.println(localUdpPort);
@@ -171,16 +164,9 @@ void setup() {
 
 // ====================== LOOP ========================
 void loop() {
-  // 1. PARSE INCOMING UDP
   int packetSize = udp.parsePacket();
   if (packetSize > 0) {
-    
-    // --- DEBUG PRINT START ---
-    Serial.print("Received packet size: ");
-    Serial.println(packetSize);
-    // --- DEBUG PRINT END ---
-
-    // Flush old packets (Keep only newest)
+    // Discard queued packets; keep only the latest
     while (udp.parsePacket() > 0) {
       udp.read(packetBuffer, 255);
     }
@@ -188,39 +174,108 @@ void loop() {
     int len = udp.read(packetBuffer, 255);
     if (len > 0) packetBuffer[len] = 0;
 
-    // --- DEBUG PRINT PAYLOAD ---
-    Serial.print("Payload: ");
-    Serial.println(packetBuffer);
-    // ---------------------------
-
-    lastSenderIP = udp.remoteIP();
-    lastSenderPort = udp.remotePort();
-    hasValidSender = true;
-
-    // CMD: "CMD v1 v2 v3" 
     if (strncmp(packetBuffer, "CMD", 3) == 0) {
-      float v1=0, v2=0, v3=0;
-      char* token = strtok(packetBuffer, " "); 
-      token = strtok(NULL, " "); if(token) v1 = atof(token);
-      token = strtok(NULL, " "); if(token) v2 = atof(token);
-      token = strtok(NULL, " "); if(token) v3 = atof(token);
+      float v1 = 0.0, v2 = 0.0, v3 = 0.0;
+      bool parseSuccess = false;
 
-      lastCommandTime = millis();
-      hasReceivedCommand = true;
-      
-      setMotorSpeed(1, v1);
-      setMotorSpeed(2, v2);
-      setMotorSpeed(3, v3);
+      char bufferCopy[255];
+      strncpy(bufferCopy, packetBuffer, sizeof(bufferCopy));
+      bufferCopy[sizeof(bufferCopy) - 1] = 0;
+
+      char *token = strtok(bufferCopy, " ");
+      if (token && strcmp(token, "CMD") == 0) {
+        token = strtok(NULL, " ");
+        if (token) {
+          v1 = atof(token);
+          token = strtok(NULL, " ");
+          if (token) {
+            v2 = atof(token);
+            token = strtok(NULL, " \n\r");
+            if (token) {
+              v3 = atof(token);
+              parseSuccess = true;
+            }
+          }
+        }
+      }
+
+      if (parseSuccess) {
+        lastCommandTime = millis();
+        hasReceivedCommand = true;
+        setMotorSpeed(wheel1, v1);
+        setMotorSpeed(wheel2, v2);
+        setMotorSpeed(wheel3, v3);
+      }
     }
     // FAN: "FAN pulse"
     else if (strncmp(packetBuffer, "FAN", 3) == 0) {
-      int val = 1000;
-      char* token = strtok(packetBuffer, " "); 
-      token = strtok(NULL, " ");
-      if(token) val = atoi(token);
-      setFanPulse(val);
-      Serial.print("Fan set to: "); // Debug for Fan
-      Serial.println(val);
+      int fanVal = fanPulse;
+      bool parseSuccess = false;
+
+      char bufferCopy[255];
+      strncpy(bufferCopy, packetBuffer, sizeof(bufferCopy));
+      bufferCopy[sizeof(bufferCopy) - 1] = 0;
+
+      char *token = strtok(bufferCopy, " ");
+      if (token && strcmp(token, "FAN") == 0) {
+        token = strtok(NULL, " \n\r");
+        if (token) {
+          fanVal = atoi(token);
+          parseSuccess = true;
+        }
+      }
+
+      if (parseSuccess) {
+        setFanPulse(fanVal);
+      }
+    }
+    else if (strncmp(packetBuffer, "MARKER_ANGLE", 12) == 0) {
+      // MARKER_ANGLE command expects: "MARKER_ANGLE <deg>"
+      int angleVal = MARKER_UP_ANGLE; // default to up if parse fails
+      bool parseSuccess = false;
+
+      char bufferCopy[255];
+      strncpy(bufferCopy, packetBuffer, sizeof(bufferCopy));
+      bufferCopy[sizeof(bufferCopy) - 1] = 0;
+
+      char *token = strtok(bufferCopy, " ");
+      if (token && strcmp(token, "MARKER_ANGLE") == 0) {
+        token = strtok(NULL, " \n\r");
+        if (token) {
+          angleVal = atoi(token);
+          parseSuccess = true;
+        }
+      }
+
+      if (parseSuccess) {
+        setMarkerAngle(angleVal);
+      }
+    }
+    else if (strncmp(packetBuffer, "MARKER", 6) == 0) {
+      // MARKER command expects: "MARKER <0|1>" where 1 = down (True), 0 = up (False)
+      int markerVal = 0;
+      bool parseSuccess = false;
+
+      char bufferCopy[255];
+      strncpy(bufferCopy, packetBuffer, sizeof(bufferCopy));
+      bufferCopy[sizeof(bufferCopy) - 1] = 0;
+
+      char *token = strtok(bufferCopy, " ");
+      if (token && strcmp(token, "MARKER") == 0) {
+        token = strtok(NULL, " \n\r");
+        if (token) {
+          markerVal = atoi(token);
+          parseSuccess = true;
+        }
+      }
+
+      if (parseSuccess) {
+        if (markerVal == 1) {
+          setMarkerAngle(MARKER_DOWN_ANGLE);
+        } else {
+          setMarkerAngle(MARKER_UP_ANGLE);
+        }
+      }
     }
   }
 
