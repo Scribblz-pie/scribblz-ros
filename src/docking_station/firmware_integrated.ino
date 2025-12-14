@@ -1,18 +1,13 @@
-/*
- * MERGED FIRMWARE: RP2040 Connect + TB6612FNG + UDP Control
- * DEBUG VERSION: Prints incoming UDP packets to Serial Monitor
- */
-
-#include <SPI.h>
-#include <WiFiNINA.h> 
+#include <WiFi.h>
 #include <WiFiUdp.h>
 #include <Wire.h>
+#include <Adafruit_MotorShield.h>
 #include <Servo.h>
-#include "I2Cdev.h"
-#include "MPU6050.h"
+#include <I2Cdev.h>
+#include <MPU6050.h>
 
 // ---------------- WIFI SETTINGS ----------------
-const char* ssid     = "OLIN-DEVICES";
+const char* ssid = "OLIN-DEVICES";
 const char* password = "BestOval4Engineers!";
 
 // ---------------- UDP SETTINGS -----------------
@@ -20,15 +15,37 @@ WiFiUDP udp;
 const unsigned int localUdpPort = 54322;  // must match ROS UDP_PORT
 char packetBuffer[255]; // Buffer to hold incoming packet
 
+// Track last command sender for IMU data transmission
+IPAddress lastSenderIP;
+unsigned int lastSenderPort = 0;
+bool hasValidSender = false;
+
+// ---------------- IMU SETTINGS -----------------
+MPU6050 accelgyro;
+int16_t ax, ay, az; // Accelerometer (raw)
+int16_t gx, gy, gz; // Gyroscope (raw)
+
+// Scale factors (LSB/unit) based on the default settings of the library:
+// Accel: MPU6050_ACCEL_FS_2 -> Sensitivity = 16384 LSB/g
 const float ACCEL_SCALE_FACTOR = 16384.0;
+// Gyro: MPU6050_GYRO_FS_250 -> Sensitivity = 131.0 LSB/deg/s
 const float GYRO_SCALE_FACTOR = 131.0;
 
+// IMU timing control
 unsigned long lastImuReadTime = 0;
 const unsigned long IMU_READ_INTERVAL = 10; // 10ms = 100Hz
 
-// ---------------- OBJECTS ----------------
+// ---------------- MOTOR DEFINITIONS ----------------
+#define MAX_SPEED 255
+
+Adafruit_MotorShield AFMS = Adafruit_MotorShield();
+Adafruit_DCMotor *wheel1 = AFMS.getMotor(2);
+Adafruit_DCMotor *wheel2 = AFMS.getMotor(3);
+Adafruit_DCMotor *wheel3 = AFMS.getMotor(4);
+
+// ---------------- FAN / ESC ------------------------
 Servo esc;
-int fanPulse = 1000; 
+int fanPulse = 1000;  // microseconds; expected range 1000–2000
 
 // ---------------- MARKER SERVO ------------------------
 Servo markerServo;
@@ -37,7 +54,7 @@ const int MARKER_DOWN_ANGLE = 160;  // Servo angle for marker down (True)
 
 // ---------------- SAFETY STATE -----------------------
 unsigned long lastCommandTime = 0;
-const unsigned long COMMAND_TIMEOUT = 50; 
+const unsigned long COMMAND_TIMEOUT = 50; // Reduced to 50ms for faster response
 bool hasReceivedCommand = false;
 
 // ---------------- DEBUG SETTINGS --------------------
@@ -48,59 +65,36 @@ void setMotorSpeed(Adafruit_DCMotor *motor, float velocity) {
   if (velocity > 1.0) velocity = 1.0;
   if (velocity < -1.0) velocity = -1.0;
 
-  int pwmVal = int(fabs(velocity) * 255);
-  int pinPWM, pinDir1, pinDir2;
-
-  if (motorID == 1) {
-    pinPWM = M1_PWM; pinDir1 = M1_BIN1; pinDir2 = M1_BIN2;
-  } else if (motorID == 2) {
-    pinPWM = M2_PWMA; pinDir1 = M2_AIN1; pinDir2 = M2_AIN2;
-  } else if (motorID == 3) {
-    pinPWM = M3_PWM; pinDir1 = M3_BIN1; pinDir2 = M3_BIN2;
-  } else {
-    return; 
-  }
+  int speed = int(fabs(velocity) * MAX_SPEED);
 
   if (velocity > 0) {
-    digitalWrite(pinDir1, HIGH); digitalWrite(pinDir2, LOW);
-    analogWrite(pinPWM, pwmVal);
+    motor->run(FORWARD);
   } else if (velocity < 0) {
-    digitalWrite(pinDir1, LOW); digitalWrite(pinDir2, HIGH);
-    analogWrite(pinPWM, pwmVal);
+    motor->run(BACKWARD);
   } else {
-    digitalWrite(pinDir1, LOW); digitalWrite(pinDir2, LOW);
-    analogWrite(pinPWM, 0);
+    motor->run(RELEASE);
   }
+
+  motor->setSpeed(speed);
+
+  #if DEBUG_MODE
+    Serial.print("Speed: ");
+    Serial.print(speed);
+    Serial.print(" Dir: ");
+    Serial.println(velocity > 0 ? "FWD" : (velocity < 0 ? "BWD" : "STOP"));
+  #endif
 }
 
-// ---------------- HELPER: FAN CONTROL ----------------
+// ---------------- HELPER: FAN SET -------------------
 void setFanPulse(int pulse) {
   if (pulse < 1000) pulse = 1000;
   if (pulse > 2000) pulse = 2000;
   fanPulse = pulse;
   esc.writeMicroseconds(fanPulse);
-}
-
-// ---------------- HELPER: IMU SENDER ----------------
-void readAndSendImu() {
-  accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-
-  float accelX_g = ax / ACCEL_SCALE_FACTOR;
-  float accelY_g = ay / ACCEL_SCALE_FACTOR;
-  float accelZ_g = az / ACCEL_SCALE_FACTOR;
-  float gyroX_dps = gx / GYRO_SCALE_FACTOR;
-  float gyroY_dps = gy / GYRO_SCALE_FACTOR;
-  float gyroZ_dps = gz / GYRO_SCALE_FACTOR;
-
-  if (hasValidSender) {
-    char imuBuffer[100];
-    snprintf(imuBuffer, sizeof(imuBuffer), "IMU %.3f %.3f %.3f %.3f %.3f %.3f",
-             accelX_g, accelY_g, accelZ_g, gyroX_dps, gyroY_dps, gyroZ_dps);
-    
-    udp.beginPacket(lastSenderIP, lastSenderPort);
-    udp.write((uint8_t*)imuBuffer, strlen(imuBuffer));
-    udp.endPacket();
-  }
+  #if DEBUG_MODE
+    Serial.print("Fan pulse set to: ");
+    Serial.println(fanPulse);
+  #endif
 }
 
 // ---------------- HELPER: MARKER SET ----------------
@@ -114,57 +108,107 @@ void setMarkerAngle(int angleDeg) {
   #endif
 }
 
+// ---------------- HELPER: UPDATE SENDER INFO ----------------
+void updateSenderInfo() {
+  lastSenderIP = udp.remoteIP();
+  lastSenderPort = udp.remotePort();
+  hasValidSender = true;
+  #if DEBUG_MODE
+    Serial.print("Updated sender: ");
+    Serial.print(lastSenderIP);
+    Serial.print(":");
+    Serial.println(lastSenderPort);
+  #endif
+}
+
+// ---------------- HELPER: READ AND SEND IMU DATA ----------------
+void readAndSendImu() {
+  // Read raw sensor data
+  accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+
+  // Convert to engineering units
+  float accelX_g = ax / ACCEL_SCALE_FACTOR;
+  float accelY_g = ay / ACCEL_SCALE_FACTOR;
+  float accelZ_g = az / ACCEL_SCALE_FACTOR;
+  float gyroX_dps = gx / GYRO_SCALE_FACTOR;
+  float gyroY_dps = gy / GYRO_SCALE_FACTOR;
+  float gyroZ_dps = gz / GYRO_SCALE_FACTOR;
+
+  // Send IMU data if we have a valid sender
+  if (hasValidSender) {
+    // Format: "IMU ax ay az gx gy gz" with 3 decimal places
+    char imuBuffer[100];
+    snprintf(imuBuffer, sizeof(imuBuffer), "IMU %.3f %.3f %.3f %.3f %.3f %.3f",
+             accelX_g, accelY_g, accelZ_g, gyroX_dps, gyroY_dps, gyroZ_dps);
+
+    udp.beginPacket(lastSenderIP, lastSenderPort);
+    udp.write((uint8_t*)imuBuffer, strlen(imuBuffer));
+    udp.endPacket();
+
+    #if DEBUG_MODE
+      Serial.print("Sent IMU: ");
+      Serial.println(imuBuffer);
+    #endif
+  }
+}
+
 // ===================== SETUP ========================
 void setup() {
-  Serial.begin(115200);
-  
-  pinMode(M1_BIN1, OUTPUT); pinMode(M1_BIN2, OUTPUT); pinMode(M1_PWM, OUTPUT);
-  pinMode(M2_AIN1, OUTPUT); pinMode(M2_AIN2, OUTPUT); pinMode(M2_PWMA, OUTPUT);
-  pinMode(M3_BIN1, OUTPUT); pinMode(M3_BIN2, OUTPUT); pinMode(M3_PWM, OUTPUT);
+  Serial.begin(9600);
+  delay(1000); // Give serial time to initialize
 
-  esc.attach(ESC_PIN);
-  esc.writeMicroseconds(1000); 
-  
-  Wire.begin();
-  Serial.println("Initializing MPU-6050...");
-  accelgyro.initialize();
-  if (accelgyro.testConnection()) {
-    Serial.println("MPU-6050 connection successful!");
-  } else {
-    Serial.println("MPU-6050 connection failed! Check wiring.");
-  }
+  // 1. Setup Motors
+  AFMS.begin();
 
-  if (WiFi.status() == WL_NO_MODULE) {
-    Serial.println("Communication with WiFi module failed!");
-    while (true);
-  }
+  // 2. Setup ESC
+  esc.attach(10);
+  esc.writeMicroseconds(1000);
 
   // 3. Setup Marker Servo
   markerServo.attach(8);
   setMarkerAngle(MARKER_UP_ANGLE);  // Start with marker up
 
-  // 4. Connect to Wi-Fi
+  // 4. Initialize IMU
+  Wire.begin();
+  Serial.println("Initializing MPU-6050...");
+  accelgyro.initialize();
+
+  // Verify IMU connection
+  if (accelgyro.testConnection()) {
+    Serial.println("MPU-6050 connection successful!");
+  } else {
+    Serial.println("MPU-6050 connection failed! Check wiring.");
+    // Continue anyway - IMU will just fail silently
+  }
+
+  // 5. Connect to Wi-Fi
   WiFi.begin(ssid, password);
+  Serial.print("Connecting to Wi-Fi");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  Serial.println("\nConnected!");
-  Serial.print("IP Address: ");
+  Serial.println();
+  Serial.print("Connected! IP: ");
   Serial.println(WiFi.localIP());
 
-  // 5. Start UDP
+  // 6. Start UDP
   udp.begin(localUdpPort);
-  Serial.print("Listening on UDP port: ");
+  Serial.print("Listening for UDP commands on port ");
   Serial.println(localUdpPort);
 
-  delay(3000); 
-  Serial.println("System Ready.");
+  // Arming delay for ESC
+  delay(3000);
+  Serial.println("Ready!");
+  
+  lastImuReadTime = millis();
 }
 
 // ====================== LOOP ========================
 void loop() {
+  // Check for incoming UDP packets
   int packetSize = udp.parsePacket();
+
   if (packetSize > 0) {
     // Discard queued packets; keep only the latest
     while (udp.parsePacket() > 0) {
@@ -173,6 +217,9 @@ void loop() {
 
     int len = udp.read(packetBuffer, 255);
     if (len > 0) packetBuffer[len] = 0;
+
+    // Update sender info for IMU transmission
+    updateSenderInfo();
 
     if (strncmp(packetBuffer, "CMD", 3) == 0) {
       float v1 = 0.0, v2 = 0.0, v3 = 0.0;
@@ -207,7 +254,6 @@ void loop() {
         setMotorSpeed(wheel3, v3);
       }
     }
-    // FAN: "FAN pulse"
     else if (strncmp(packetBuffer, "FAN", 3) == 0) {
       int fanVal = fanPulse;
       bool parseSuccess = false;
@@ -279,18 +325,18 @@ void loop() {
     }
   }
 
-  // 2. SAFETY TIMEOUT
+  // Fast safety timeout check for motors
   if (hasReceivedCommand && (millis() - lastCommandTime > COMMAND_TIMEOUT)) {
-    setMotorSpeed(1, 0);
-    setMotorSpeed(2, 0);
-    setMotorSpeed(3, 0);
-    hasReceivedCommand = false; 
-    // Serial.println("Timeout: Stopping Motors"); // Uncomment if you want to see timeout events
+    wheel1->run(RELEASE);
+    wheel2->run(RELEASE);
+    wheel3->run(RELEASE);
   }
 
-  // 3. IMU TELEMETRY
-  if (millis() - lastImuReadTime >= IMU_READ_INTERVAL) {
+  // Read and send IMU data at 100Hz (every 10ms)
+  unsigned long currentTime = millis();
+  if (currentTime - lastImuReadTime >= IMU_READ_INTERVAL) {
     readAndSendImu();
-    lastImuReadTime = millis();
+    lastImuReadTime = currentTime;
   }
 }
+

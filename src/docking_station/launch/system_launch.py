@@ -28,6 +28,10 @@ def generate_launch_description():
         executable='foxglove_bridge',
         name='foxglove_bridge',
         output='screen',
+        parameters=[{
+        'topic_whitelist': ['.*'],  # Subscribe to ALL topics
+        # Or remove the best_effort line if you want reliable QoS
+    }],
         arguments=['--ros-args', '--log-level', 'info']
     )
 
@@ -53,6 +57,41 @@ def generate_launch_description():
         }]
     )
 
+    # Drawing control node
+    # drawing_control_node = Node(
+    #     package='docking_station',
+    #     executable='drawing_control',
+    #     name='drawing_control',
+    #     output='screen',
+    #     parameters=[{
+    #         'waypoint_tolerance': 0.05,
+    #         'max_linear_vel': 0.3,
+    #         'kp': 2.0,
+    #         'control_frequency': 20.0,
+    #         'obstacle_threshold': 0.15
+    #     }]
+    # )
+
+    # Drawing driver node
+    drawing_driver_node = Node(
+        package='docking_station',
+        executable='drawing_driver',
+        name='drawing_driver',
+        output='screen',
+        parameters=[{
+            'waypoints_file': 'waypoints.json',
+            'use_imu': True
+        }]
+    )
+
+    # Image to path node
+    image_to_path_node = Node(
+        package='docking_station',
+        executable='image_to_path',
+        name='image_to_path',
+        output='screen'
+    )
+
     # Drawing action server node
     drawing_action_server_node = Node(
         package='docking_station',
@@ -64,9 +103,13 @@ def generate_launch_description():
             'max_linear_vel': 0.3,
             'max_angular_vel': 0.5,
             'control_frequency': 20.0,
+            'kp_linear': 2.0,
+            'ki_linear': 0.0,
+            'kd_linear': 0.0,
             'target_fan_speed': 255,
             'fan_ramp_steps': 10,
             'fan_ramp_delay': 0.1,
+            'enable_fan': False,  # Disable fan for testing
             'imu_reset_topic': '/imu/reset',
             'initialization_timeout': 5.0
         }]
@@ -116,8 +159,10 @@ def generate_launch_description():
         foxglove_node,
         state_machine_node,
         battery_monitor_node,
+        # drawing_control_node,
+        drawing_driver_node,
+        image_to_path_node,
         drawing_action_server_node,
         docking_action_server_node,
         lidar_pose_node
     ])
-
