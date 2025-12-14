@@ -29,6 +29,7 @@ setup(
         'console_scripts': [
             'teleop_node = docking_station.teleop_node:main',
             'udp_command_sender = docking_station.udp_command_sender:main',
+            'imu_udp_receiver = docking_station.imu_udp_receiver_node:main',
             'state_machine = docking_station.state_machine_node:main',
             'battery_monitor = docking_station.battery_monitor_node:main',
             'drawing_action_server = docking_station.drawing_action_server_node:main',

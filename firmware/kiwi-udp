@@ -1,201 +1,241 @@
-#include <WiFi.h>
+/*
+ * MERGED FIRMWARE: RP2040 Connect + TB6612FNG + UDP Control
+ * DEBUG VERSION: Prints incoming UDP packets to Serial Monitor
+ */
+
+#include <SPI.h>
+#include <WiFiNINA.h> 
 #include <WiFiUdp.h>
 #include <Wire.h>
-#include <Adafruit_MotorShield.h>
 #include <Servo.h>
+#include "I2Cdev.h"
+#include "MPU6050.h"
 
 // ---------------- WIFI SETTINGS ----------------
-const char* ssid = "OLIN-DEVICES";
+const char* ssid     = "OLIN-DEVICES";
 const char* password = "BestOval4Engineers!";
 
 // ---------------- UDP SETTINGS -----------------
 WiFiUDP udp;
-// MUST match the port defined in your Python script (UDP_PORT = 54322)
 const unsigned int localUdpPort = 54322;
-char packetBuffer[255]; // Buffer to hold incoming packet
+char packetBuffer[255]; 
 
-// ---------------- MOTOR DEFINITIONS ----------------
-#define MAX_SPEED 255
+// Track sender for telemetry
+IPAddress lastSenderIP;
+unsigned int lastSenderPort = 0;
+bool hasValidSender = false;
 
-Adafruit_MotorShield AFMS = Adafruit_MotorShield();
-Adafruit_DCMotor *wheel1 = AFMS.getMotor(2);
-Adafruit_DCMotor *wheel2 = AFMS.getMotor(3);
-Adafruit_DCMotor *wheel3 = AFMS.getMotor(4);
+// ---------------- HARDWARE PINOUT ----------------
+// Motor #1 (Front)
+#define M1_BIN1 A2
+#define M1_BIN2 A3
+#define M1_PWM  4   // D4
 
-// ---------------- FAN / ESC ------------------------
+// Motor #2 (Left Rear)
+#define M2_PWMA 3   // D3
+#define M2_AIN2 7   // D7
+#define M2_AIN1 8   // D8
+
+// Motor #3 (Right Rear)
+#define M3_BIN1 A1
+#define M3_BIN2 A0
+#define M3_PWM  5   // D5
+
+// ESC (Brushless Motor / Fan)
+#define ESC_PIN 6   // D6
+
+// ---------------- IMU SETTINGS -----------------
+MPU6050 accelgyro;
+int16_t ax, ay, az;
+int16_t gx, gy, gz;
+
+const float ACCEL_SCALE_FACTOR = 16384.0;
+const float GYRO_SCALE_FACTOR = 131.0;
+
+unsigned long lastImuReadTime = 0;
+const unsigned long IMU_READ_INTERVAL = 10; // 10ms = 100Hz
+
+// ---------------- OBJECTS ----------------
 Servo esc;
-int fanPulse = 1000;  // microseconds; expected range 1000–2000
+int fanPulse = 1000; 
 
-// ---------------- SAFETY STATE -----------------------
+// ---------------- SAFETY STATE ----------------
 unsigned long lastCommandTime = 0;
-const unsigned long COMMAND_TIMEOUT = 50; // Reduced to 50ms for faster response
+const unsigned long COMMAND_TIMEOUT = 50; 
 bool hasReceivedCommand = false;
 
-// ---------------- DEBUG SETTINGS --------------------
-#define DEBUG_MODE false  // Set to true to enable Serial prints (slows down processing)
-
-// ---------------- HELPER: MOTOR SPEED SET -------------------
-void setMotorSpeed(Adafruit_DCMotor *motor, float velocity) {
-  // Clamp velocity to -1.0 to 1.0 range
+// ---------------- HELPER: SET TB6612FNG MOTOR ----------------
+void setMotorSpeed(int motorID, float velocity) {
   if (velocity > 1.0) velocity = 1.0;
   if (velocity < -1.0) velocity = -1.0;
 
-  int speed = int(fabs(velocity) * MAX_SPEED);
+  int pwmVal = int(fabs(velocity) * 255);
+  int pinPWM, pinDir1, pinDir2;
 
-  if (velocity > 0) {
-    motor->run(FORWARD);
-  } else if (velocity < 0) {
-    motor->run(BACKWARD);
+  if (motorID == 1) {
+    pinPWM = M1_PWM; pinDir1 = M1_BIN1; pinDir2 = M1_BIN2;
+  } else if (motorID == 2) {
+    pinPWM = M2_PWMA; pinDir1 = M2_AIN1; pinDir2 = M2_AIN2;
+  } else if (motorID == 3) {
+    pinPWM = M3_PWM; pinDir1 = M3_BIN1; pinDir2 = M3_BIN2;
   } else {
-    motor->run(RELEASE);
+    return; 
   }
 
-  motor->setSpeed(speed);
-
-  #if DEBUG_MODE
-    Serial.print("Speed: ");
-    Serial.print(speed);
-    Serial.print(" Dir: ");
-    Serial.println(velocity > 0 ? "FWD" : (velocity < 0 ? "BWD" : "STOP"));
-  #endif
+  if (velocity > 0) {
+    digitalWrite(pinDir1, HIGH); digitalWrite(pinDir2, LOW);
+    analogWrite(pinPWM, pwmVal);
+  } else if (velocity < 0) {
+    digitalWrite(pinDir1, LOW); digitalWrite(pinDir2, HIGH);
+    analogWrite(pinPWM, pwmVal);
+  } else {
+    digitalWrite(pinDir1, LOW); digitalWrite(pinDir2, LOW);
+    analogWrite(pinPWM, 0);
+  }
 }
 
-// ---------------- HELPER: FAN SET -------------------
+// ---------------- HELPER: FAN CONTROL ----------------
 void setFanPulse(int pulse) {
-  // Clamp to typical ESC range
   if (pulse < 1000) pulse = 1000;
   if (pulse > 2000) pulse = 2000;
   fanPulse = pulse;
   esc.writeMicroseconds(fanPulse);
-  #if DEBUG_MODE
-    Serial.print("Fan pulse set to: ");
-    Serial.println(fanPulse);
-  #endif
+}
+
+// ---------------- HELPER: IMU SENDER ----------------
+void readAndSendImu() {
+  accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+
+  float accelX_g = ax / ACCEL_SCALE_FACTOR;
+  float accelY_g = ay / ACCEL_SCALE_FACTOR;
+  float accelZ_g = az / ACCEL_SCALE_FACTOR;
+  float gyroX_dps = gx / GYRO_SCALE_FACTOR;
+  float gyroY_dps = gy / GYRO_SCALE_FACTOR;
+  float gyroZ_dps = gz / GYRO_SCALE_FACTOR;
+
+  if (hasValidSender) {
+    char imuBuffer[100];
+    snprintf(imuBuffer, sizeof(imuBuffer), "IMU %.3f %.3f %.3f %.3f %.3f %.3f",
+             accelX_g, accelY_g, accelZ_g, gyroX_dps, gyroY_dps, gyroZ_dps);
+    
+    udp.beginPacket(lastSenderIP, lastSenderPort);
+    udp.write((uint8_t*)imuBuffer, strlen(imuBuffer));
+    udp.endPacket();
+  }
 }
 
 // ===================== SETUP ========================
 void setup() {
-  Serial.begin(9600);
-  delay(1000); // Give serial time to initialize
+  Serial.begin(115200);
+  
+  pinMode(M1_BIN1, OUTPUT); pinMode(M1_BIN2, OUTPUT); pinMode(M1_PWM, OUTPUT);
+  pinMode(M2_AIN1, OUTPUT); pinMode(M2_AIN2, OUTPUT); pinMode(M2_PWMA, OUTPUT);
+  pinMode(M3_BIN1, OUTPUT); pinMode(M3_BIN2, OUTPUT); pinMode(M3_PWM, OUTPUT);
 
-  // 1. Setup Motors
-  AFMS.begin();
+  esc.attach(ESC_PIN);
+  esc.writeMicroseconds(1000); 
+  
+  Wire.begin();
+  Serial.println("Initializing MPU-6050...");
+  accelgyro.initialize();
+  if (accelgyro.testConnection()) {
+    Serial.println("MPU-6050 connection successful!");
+  } else {
+    Serial.println("MPU-6050 connection failed! Check wiring.");
+  }
 
-  // 2. Setup ESC
-  esc.attach(10);
-  esc.writeMicroseconds(1000);
+  if (WiFi.status() == WL_NO_MODULE) {
+    Serial.println("Communication with WiFi module failed!");
+    while (true);
+  }
 
-  // 3. Connect to Wi-Fi
+  Serial.print("Connecting to Wi-Fi: ");
+  Serial.println(ssid);
+  
   WiFi.begin(ssid, password);
-  Serial.print("Connecting to Wi-Fi");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  Serial.println();
-  Serial.print("Connected! IP: ");
+  Serial.println("\nConnected!");
+  Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
 
-  // 4. Start UDP
   udp.begin(localUdpPort);
-  Serial.print("Listening for UDP commands on port ");
+  Serial.print("Listening on UDP port: ");
   Serial.println(localUdpPort);
 
-  // Arming delay for ESC
-  delay(3000);
-  Serial.println("Ready!");
+  delay(3000); 
+  Serial.println("System Ready.");
 }
 
 // ====================== LOOP ========================
 void loop() {
-  // Fast packet processing - check for packets
+  // 1. PARSE INCOMING UDP
   int packetSize = udp.parsePacket();
-
   if (packetSize > 0) {
-    // Discard any queued packets; keep only the latest
+    
+    // --- DEBUG PRINT START ---
+    Serial.print("Received packet size: ");
+    Serial.println(packetSize);
+    // --- DEBUG PRINT END ---
+
+    // Flush old packets (Keep only newest)
     while (udp.parsePacket() > 0) {
       udp.read(packetBuffer, 255);
     }
 
-    // Read the latest packet
     int len = udp.read(packetBuffer, 255);
-    if (len > 0) {
-      packetBuffer[len] = 0; // Null-terminate string
-    }
+    if (len > 0) packetBuffer[len] = 0;
 
-    // Parse the packet
+    // --- DEBUG PRINT PAYLOAD ---
+    Serial.print("Payload: ");
+    Serial.println(packetBuffer);
+    // ---------------------------
+
+    lastSenderIP = udp.remoteIP();
+    lastSenderPort = udp.remotePort();
+    hasValidSender = true;
+
+    // CMD: "CMD v1 v2 v3" 
     if (strncmp(packetBuffer, "CMD", 3) == 0) {
-      float v1 = 0.0, v2 = 0.0, v3 = 0.0;
-      bool parseSuccess = false;
+      float v1=0, v2=0, v3=0;
+      char* token = strtok(packetBuffer, " "); 
+      token = strtok(NULL, " "); if(token) v1 = atof(token);
+      token = strtok(NULL, " "); if(token) v2 = atof(token);
+      token = strtok(NULL, " "); if(token) v3 = atof(token);
 
-      // Make a copy for strtok (strtok modifies the string)
-      char bufferCopy[255];
-      strncpy(bufferCopy, packetBuffer, sizeof(bufferCopy));
-      bufferCopy[sizeof(bufferCopy) - 1] = 0;
-
-      char *token = strtok(bufferCopy, " ");
-      if (token && strcmp(token, "CMD") == 0) {
-        token = strtok(NULL, " ");
-        if (token) {
-          v1 = atof(token);
-          token = strtok(NULL, " ");
-          if (token) {
-            v2 = atof(token);
-            token = strtok(NULL, " \n\r");
-            if (token) {
-              v3 = atof(token);
-              parseSuccess = true;
-            }
-          }
-        }
-      }
-
-      if (parseSuccess) {
-        lastCommandTime = millis();
-        hasReceivedCommand = true;
-
-        #if DEBUG_MODE
-          Serial.print("V1: ");
-          Serial.print(v1);
-          Serial.print(" | V2: ");
-          Serial.print(v2);
-          Serial.print(" | V3: ");
-          Serial.println(v3);
-        #endif
-
-        setMotorSpeed(wheel1, v1);
-        setMotorSpeed(wheel2, v2);
-        setMotorSpeed(wheel3, v3);
-      }
+      lastCommandTime = millis();
+      hasReceivedCommand = true;
+      
+      setMotorSpeed(1, v1);
+      setMotorSpeed(2, v2);
+      setMotorSpeed(3, v3);
     }
+    // FAN: "FAN pulse"
     else if (strncmp(packetBuffer, "FAN", 3) == 0) {
-      // FAN command expects: "FAN <int>"
-      int fanVal = fanPulse; // default to current
-      bool parseSuccess = false;
-
-      char bufferCopy[255];
-      strncpy(bufferCopy, packetBuffer, sizeof(bufferCopy));
-      bufferCopy[sizeof(bufferCopy) - 1] = 0;
-
-      char *token = strtok(bufferCopy, " ");
-      if (token && strcmp(token, "FAN") == 0) {
-        token = strtok(NULL, " \n\r");
-        if (token) {
-          fanVal = atoi(token);
-          parseSuccess = true;
-        }
-      }
-
-      if (parseSuccess) {
-        setFanPulse(fanVal);
-      }
+      int val = 1000;
+      char* token = strtok(packetBuffer, " "); 
+      token = strtok(NULL, " ");
+      if(token) val = atoi(token);
+      setFanPulse(val);
+      Serial.print("Fan set to: "); // Debug for Fan
+      Serial.println(val);
     }
   }
 
-  // Fast safety timeout check for motors
+  // 2. SAFETY TIMEOUT
   if (hasReceivedCommand && (millis() - lastCommandTime > COMMAND_TIMEOUT)) {
-    wheel1->run(RELEASE);
-    wheel2->run(RELEASE);
-    wheel3->run(RELEASE);
+    setMotorSpeed(1, 0);
+    setMotorSpeed(2, 0);
+    setMotorSpeed(3, 0);
+    hasReceivedCommand = false; 
+    // Serial.println("Timeout: Stopping Motors"); // Uncomment if you want to see timeout events
+  }
+
+  // 3. IMU TELEMETRY
+  if (millis() - lastImuReadTime >= IMU_READ_INTERVAL) {
+    readAndSendImu();
+    lastImuReadTime = millis();
   }
 }

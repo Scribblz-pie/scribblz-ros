@@ -30,24 +30,43 @@ from docking_station.path_pipeline.holonomic_motion import (
 )
 
 # Constants (copied from path_sim_graph_eulerian.py)
-TARGET_CANVAS_WIDTH = 1.0
-CANVAS_PADDING = 0.05
-ROBOT_SIDE_LENGTH = 0.1732
-MARKER_OFFSET_X = 0.05
-MARKER_OFFSET_Y = -0.0577
-DOCK_POSITION = (1.05, -0.15)
-DOCK_APPROACH = (1.05, 0.05)
-DOCK_ORIENTATION = math.pi / 2
-ERASE_MARGIN = 0.01
-ROBOT_SPEED = 0.1
-ROBOT_TURN_SPEED_DEG_PER_SEC = 90.0
-ROBOT_WHEELBASE_L = 0.0866
-ROBOT_PENUP_SPEED = 0.2
+# Moved to instance variables with ROS parameters
 
 
 class ImageToPathNode(Node):
     def __init__(self):
         super().__init__('image_to_path')
+        
+        # Declare parameters
+        self.declare_parameter('dock_position_x', 1.05)
+        self.declare_parameter('dock_position_y', 1.05)
+        self.declare_parameter('dock_approach_x', 1.05)
+        self.declare_parameter('dock_approach_y', 0.95)
+        self.declare_parameter('dock_orientation', math.pi)
+        self.declare_parameter('target_canvas_width', 1.0)
+        
+        # Load parameters into constants
+        self.DOCK_POSITION = (
+            self.get_parameter('dock_position_x').value,
+            self.get_parameter('dock_position_y').value
+        )
+        self.DOCK_APPROACH = (
+            self.get_parameter('dock_approach_x').value,
+            self.get_parameter('dock_approach_y').value
+        )
+        self.DOCK_ORIENTATION = self.get_parameter('dock_orientation').value
+        self.TARGET_CANVAS_WIDTH = self.get_parameter('target_canvas_width').value
+        
+        # Other constants (not parameterized yet)
+        self.CANVAS_PADDING = 0.05
+        self.ROBOT_SIDE_LENGTH = 0.1732
+        self.MARKER_OFFSET_X = 0.05
+        self.MARKER_OFFSET_Y = -0.0577
+        self.ERASE_MARGIN = 0.01
+        self.ROBOT_SPEED = 0.1
+        self.ROBOT_TURN_SPEED_DEG_PER_SEC = 90.0
+        self.ROBOT_WHEELBASE_L = 0.0866
+        self.ROBOT_PENUP_SPEED = 0.2
         
         # Subscriber for uploaded images
         self.image_sub = self.create_subscription(
@@ -101,8 +120,8 @@ class ImageToPathNode(Node):
         # Build image stages
         stages = generate_image_stages(
             image_path=image_path,
-            target_width=TARGET_CANVAS_WIDTH,
-            padding=CANVAS_PADDING,
+            target_width=self.TARGET_CANVAS_WIDTH,
+            padding=self.CANVAS_PADDING,
             smooth_factor=0.0,
             smoothing_points=200,
             simplification_epsilon_factor=0.0,
@@ -119,31 +138,41 @@ class ImageToPathNode(Node):
         if not strokes:
             raise ValueError("No strokes found in image")
         
-        ordered_strokes = order_strokes_with_containment(strokes, start_position=DOCK_APPROACH)
+        ordered_strokes = order_strokes_with_containment(strokes, start_position=self.DOCK_APPROACH)
         
-        # Compute orientations (only draw phase)
-        _, draw_wps, _ = plan_all_orientations(
+        # Compute orientations (all phases)
+        undock_wps, draw_wps, dock_wps = plan_all_orientations(
             ordered_strokes,
-            robot_side_length=ROBOT_SIDE_LENGTH,
-            marker_offset_x=MARKER_OFFSET_X,
-            marker_offset_y=MARKER_OFFSET_Y,
+            robot_side_length=self.ROBOT_SIDE_LENGTH,
+            marker_offset_x=self.MARKER_OFFSET_X,
+            marker_offset_y=self.MARKER_OFFSET_Y,
             samples_per_stroke=100,
-            collision_buffer=ERASE_MARGIN,
+            collision_buffer=self.ERASE_MARGIN,
             smooth_rate=0.3,
-            dock_position=DOCK_POSITION,
-            dock_approach=DOCK_APPROACH,
-            dock_orientation=DOCK_ORIENTATION,
+            dock_position=self.DOCK_POSITION,
+            dock_approach=self.DOCK_APPROACH,
+            dock_orientation=self.DOCK_ORIENTATION,
         )
         
+        # Combine all waypoints
+        all_wps = undock_wps + draw_wps + dock_wps
+        
+        # Offset the path so DOCK_POSITION becomes (0, 0)
+        offset_x = -self.DOCK_POSITION[0]
+        offset_y = -self.DOCK_POSITION[1]
+        for wp in all_wps:
+            wp.x += offset_x
+            wp.y += offset_y
+        
         # Optimize for pure translation
-        draw_wps = optimize_waypoints_for_pure_translation(draw_wps, rotation_threshold_rad=0.05)
+        all_wps = optimize_waypoints_for_pure_translation(all_wps, rotation_threshold_rad=0.05)
         
         # Convert to Path message
         path_msg = Path()
         path_msg.header.stamp = self.get_clock().now().to_msg()
         path_msg.header.frame_id = 'map'  # Assuming map frame
         
-        for wp in draw_wps:
+        for wp in all_wps:
             pose = PoseStamped()
             pose.header = path_msg.header
             pose.pose.position.x = wp.x

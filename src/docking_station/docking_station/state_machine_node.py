@@ -5,6 +5,8 @@ from std_msgs.msg import String, Empty
 from geometry_msgs.msg import Twist
 from geometry_msgs.msg import Point
 from std_srvs.srv import SetBool
+import json
+import time
 
 
 class StateMachineNode(Node):
@@ -12,10 +14,11 @@ class StateMachineNode(Node):
         super().__init__('state_machine')
         
         self.state = 'docked'
-        self.valid_states = ['docked', 'drawing', 'returning_to_docking_station', 'teleop', 'error', 'recovering']
+        self.valid_states = ['docked', 'drawing', 'docking', 'teleop', 'error', 'recovering']
         
         self.state_pub = self.create_publisher(String, '/robot_state', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 1)
+        self.debug_pub = self.create_publisher(String, '/state_machine/debug', 10)
         
         # Service to set robot state - using SetBool as a simple trigger
         # Note: This is a simplified replacement. For full state management,
@@ -66,6 +69,7 @@ class StateMachineNode(Node):
         self.state_timer = self.create_timer(1.0, self.publish_state)
         
         self.get_logger().info('state machine initialized, starting in docked state')
+        self.publish_debug('initialized', {'state': self.state})
     
     def set_state_callback(self, request, response):
         # Simplified: SetBool.data=True triggers state transition
@@ -74,24 +78,58 @@ class StateMachineNode(Node):
         response.success = True
         return response
     
+    def publish_debug(self, event, data):
+        """Publish debug information."""
+        debug_msg = String()
+        debug_data = {
+            'event': event,
+            'timestamp': time.time(),
+            'data': data
+        }
+        debug_msg.data = json.dumps(debug_data)
+        self.debug_pub.publish(debug_msg)
+        self.get_logger().debug(f'[STATE_DEBUG] {event}: {data}')
+    
     def set_state_topic_callback(self, msg):
         """Topic-based state management - recommended approach"""
         new_state = msg.data
+        self.publish_debug('state_change_request', {
+            'requested_state': new_state,
+            'current_state': self.state,
+            'is_valid_state': new_state in self.valid_states
+        })
+        
         if new_state in self.valid_states:
             if self.is_valid_transition(self.state, new_state):
+                old_state = self.state
                 self.state = new_state
                 self.get_logger().info(f'state changed to: {new_state}')
+                self.publish_debug('state_changed', {
+                    'old_state': old_state,
+                    'new_state': new_state,
+                    'transition_valid': True
+                })
                 
                 if new_state == 'drawing':
                     # Note: Drawing requires a path to be published to /execute_drawing_path
                     # The state machine doesn't publish the path - external node should do this
                     pass
-                elif new_state == 'returning_to_docking_station':
+                elif new_state == 'docking':
                     self.start_docking()
             else:
                 self.get_logger().warn(f'invalid transition from {self.state} to {new_state}')
+                self.publish_debug('state_change_rejected', {
+                    'reason': 'invalid_transition',
+                    'from_state': self.state,
+                    'to_state': new_state
+                })
         else:
             self.get_logger().warn(f'invalid state: {new_state}')
+            self.publish_debug('state_change_rejected', {
+                'reason': 'invalid_state',
+                'requested_state': new_state,
+                'valid_states': self.valid_states
+            })
     
     def is_valid_transition(self, from_state, to_state):
         if to_state == 'teleop' or to_state == 'error':
@@ -104,9 +142,9 @@ class StateMachineNode(Node):
             return True
         if from_state == 'docked' and to_state == 'drawing':
             return True
-        if from_state == 'drawing' and to_state == 'returning_to_docking_station':
+        if from_state == 'drawing' and to_state == 'docking':
             return True
-        if from_state == 'returning_to_docking_station' and to_state == 'docked':
+        if from_state == 'docking' and to_state == 'docked':
             return True
         return False
     
@@ -114,12 +152,12 @@ class StateMachineNode(Node):
         # Point message: x=voltage, y=level, z=low_battery (0.0 or 1.0)
         self.low_battery = (msg.z > 0.5)
         if self.low_battery and self.state == 'drawing':
-            self.get_logger().warn('low battery detected, transitioning to returning_to_docking_station')
-            self.state = 'returning_to_docking_station'
+            self.get_logger().warn('low battery detected, transitioning to docking')
+            self.state = 'docking'
             self.start_docking()
     
     def docking_cmd_callback(self, msg):
-        if self.state == 'returning_to_docking_station':
+        if self.state == 'docking':
             self.current_cmd = msg
     
     def teleop_cmd_callback(self, msg):
@@ -150,6 +188,14 @@ class StateMachineNode(Node):
         elif self.current_cmd is not None:
             # Route teleop or docking commands
             self.cmd_vel_pub.publish(self.current_cmd)
+            # Debug every 50 iterations (5 seconds at 10Hz)
+            if int(time.time() * 10) % 50 == 0:
+                self.publish_debug('command_routing', {
+                    'state': self.state,
+                    'has_cmd': self.current_cmd is not None,
+                    'cmd_x': self.current_cmd.linear.x if self.current_cmd else 0.0,
+                    'cmd_y': self.current_cmd.linear.y if self.current_cmd else 0.0
+                })
         else:
             cmd = Twist()
             self.cmd_vel_pub.publish(cmd)
