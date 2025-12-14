@@ -37,6 +37,7 @@ setup(
             'drawing_control = docking_station.drawing_control_node:main',
             'drawing_driver = docking_station.drawing_driver_node:main',
             'image_to_path = docking_station.image_to_path_node:main',
+            'dead_reckoning = docking_station.dead_reckoning_odom:main',
         ],
     },
 )
