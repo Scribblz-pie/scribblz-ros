@@ -11,8 +11,10 @@ def main(args=None):
         rclpy.spin(processor)
     except KeyboardInterrupt:
         pass
-    processor.destroy_node()
-    rclpy.shutdown()
+    finally:
+        processor.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

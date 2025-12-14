@@ -1,0 +1,17 @@
+# Example waypoints file
+# Format: x y [yaw_in_radians]
+# Lines starting with # are comments
+# If yaw is omitted, defaults to 0.0
+
+# Simple line
+0.1 0.1 0.0
+0.2 0.2 0.0
+0.3 0.3 0.0
+
+# Square with rotations
+0.4 0.4 0.0
+0.5 0.4 1.57
+0.5 0.5 3.14
+0.4 0.5 4.71
+0.4 0.4 0.0
+

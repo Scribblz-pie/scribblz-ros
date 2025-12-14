@@ -43,20 +43,6 @@ def generate_launch_description():
         output='screen'
     )
 
-    # Battery monitor node
-    battery_monitor_node = Node(
-        package='docking_station',
-        executable='battery_monitor',
-        name='battery_monitor',
-        output='screen',
-        parameters=[{
-            'battery_topic': '/battery_voltage',
-            'low_battery_threshold': 0.2,
-            'voltage_min': 10.0,
-            'voltage_max': 12.6
-        }]
-    )
-
     # Drawing control node
     # drawing_control_node = Node(
     #     package='docking_station',
@@ -72,11 +58,11 @@ def generate_launch_description():
     #     }]
     # )
 
-    # Drawing driver node
-    drawing_driver_node = Node(
+    # Kinematics node (converts world-frame velocities to wheel velocities)
+    kinematics_node = Node(
         package='docking_station',
-        executable='drawing_driver',
-        name='drawing_driver',
+        executable='kinematics',
+        name='kinematics',
         output='screen',
         parameters=[{
             'waypoints_file': 'waypoints.json',
@@ -84,34 +70,36 @@ def generate_launch_description():
         }]
     )
 
-    # Image to path node
-    image_to_path_node = Node(
+    # Image processor node (converts images to drawing paths)
+    image_processor_node = Node(
         package='docking_station',
-        executable='image_to_path',
-        name='image_to_path',
+        executable='image_processor',
+        name='image_processor',
         output='screen'
     )
 
-    # Drawing action server node
-    drawing_action_server_node = Node(
+    # Path follower node (executes drawing paths with PID control)
+    path_follower_node = Node(
         package='docking_station',
-        executable='drawing_action_server',
-        name='drawing_action_server',
+        executable='path_follower',
+        name='path_follower',
         output='screen',
         parameters=[{
             'waypoint_tolerance': 0.05,
-            'max_linear_vel': 0.3,
+            'heading_tolerance': 0.1,
+            'max_forward_vel': 0.3,
+            'max_lateral_vel': 0.3,
             'max_angular_vel': 0.5,
             'control_frequency': 20.0,
-            'kp_linear': 2.0,
-            'ki_linear': 0.0,
-            'kd_linear': 0.0,
-            'target_fan_speed': 255,
-            'fan_ramp_steps': 10,
-            'fan_ramp_delay': 0.1,
-            'enable_fan': False,  # Disable fan for testing
-            'imu_reset_topic': '/imu/reset',
-            'initialization_timeout': 5.0
+            'kp_forward': 2.0,
+            'ki_forward': 0.0,
+            'kd_forward': 0.0,
+            'kp_lateral': 2.0,
+            'ki_lateral': 0.0,
+            'kd_lateral': 0.0,
+            'kp_heading': 1.0,
+            'ki_heading': 0.0,
+            'kd_heading': 0.0
         }]
     )
 
@@ -158,11 +146,10 @@ def generate_launch_description():
         udp_command_sender_node,
         foxglove_node,
         state_machine_node,
-        battery_monitor_node,
         # drawing_control_node,
-        drawing_driver_node,
-        image_to_path_node,
-        drawing_action_server_node,
+        kinematics_node,
+        image_processor_node,
+        path_follower_node,
         docking_action_server_node,
         lidar_pose_node
     ])

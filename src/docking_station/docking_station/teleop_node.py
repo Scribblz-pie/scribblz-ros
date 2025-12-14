@@ -21,10 +21,7 @@ class TeleopNode(Node):
         # Separate scale for angular velocity to allow stronger turning
         self.declare_parameter('angular_scale', 10.0)
         self.angular_scale = self.get_parameter('angular_scale').get_parameter_value().double_value
-        
-        # Separate scale for angular velocity to allow stronger turning
-        self.declare_parameter('angular_scale', 10.0)
-        self.angular_scale = self.get_parameter('angular_scale').get_parameter_value().double_value
+    
         
         self.motor_publisher = self.create_publisher(
             Twist,

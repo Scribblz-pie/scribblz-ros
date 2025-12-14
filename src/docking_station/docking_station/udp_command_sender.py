@@ -2,7 +2,8 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Int32, Bool, Float64
+from std_msgs.msg import Int32, Bool, Float64, Empty
+from sensor_msgs.msg import Imu
 import socket
 import threading
 import math
@@ -21,6 +22,7 @@ class UDPCommandSender(Node):
         self.fan_msg_count = 0
         self.marker_msg_count = 0
         self.marker_angle_msg_count = 0
+        self.imu_msg_count = 0
         
         # Yaw integration state
         self.current_yaw = 0.0  # radians
@@ -56,6 +58,9 @@ class UDPCommandSender(Node):
             self.marker_angle_callback,
             1
         )
+        
+        # === PUBLISHERS (Data FROM Arduino) ===
+        self.imu_publisher = self.create_publisher(Imu, '/imu/data', 10)
         
         # Set up UDP socket for sending commands
         try:
@@ -256,9 +261,13 @@ class UDPCommandSender(Node):
                 if self.imu_msg_count % 50 == 0:
                     yaw_deg = math.degrees(self.current_yaw)
                     self.get_logger().info(f'[IMU #{self.imu_msg_count}] Yaw: {yaw_deg:.2f}°')
+            else:
+                self.get_logger().warn(f"IMU message has wrong number of parts: {len(parts)}, expected 7. Message: {message}")
                 
-        except ValueError as e:
-            self.get_logger().warn(f"Failed to parse IMU data: {e}")
+        except (ValueError, NameError, AttributeError) as e:
+            self.get_logger().error(f"Failed to process IMU data: {e}. Message: {message}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
     
     def destroy_node(self):
         self.running = False

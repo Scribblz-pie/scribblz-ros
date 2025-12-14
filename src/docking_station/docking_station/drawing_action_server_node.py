@@ -10,9 +10,9 @@ import time
 import json
 
 
-class DrawingActionServerNode(Node):
+class PathFollowerNode(Node):
     def __init__(self):
-        super().__init__('drawing_action_server')
+        super().__init__('path_follower')
         
         self.declare_parameter('waypoint_tolerance', 0.05)
         self.declare_parameter('max_linear_vel', 0.3)
@@ -115,7 +115,7 @@ class DrawingActionServerNode(Node):
         self.prev_error = 0.0
         self.integral = 0.0
         
-        self.get_logger().info('drawing server initialized (topic-based)')
+        self.get_logger().info('Path follower node initialized')
         
         # Test debug publisher immediately
         try:
@@ -626,7 +626,7 @@ class DrawingActionServerNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = DrawingActionServerNode()
+    node = PathFollowerNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

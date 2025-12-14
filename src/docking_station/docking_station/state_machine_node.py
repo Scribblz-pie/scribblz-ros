@@ -3,7 +3,6 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String, Empty
 from geometry_msgs.msg import Twist
-from geometry_msgs.msg import Point
 from std_srvs.srv import SetBool
 import json
 import time
@@ -38,13 +37,6 @@ class StateMachineNode(Node):
             10
         )
         
-        self.battery_sub = self.create_subscription(
-            Point,
-            '/battery_status',
-            self.battery_callback,
-            10
-        )
-        
         self.docking_cmd_sub = self.create_subscription(
             Twist,
             '/docking/cmd_vel',
@@ -63,7 +55,6 @@ class StateMachineNode(Node):
         self.dock_trigger_pub = self.create_publisher(Empty, '/dock_robot_trigger', 1)
         
         self.current_cmd = None
-        self.low_battery = False
         
         # Subscribe to /robot_state to accept manual state changes
         # We'll ignore messages that match our current state (likely our own publishes)
@@ -177,14 +168,6 @@ class StateMachineNode(Node):
         if from_state == 'docking' and to_state == 'docked':
             return True
         return False
-    
-    def battery_callback(self, msg):
-        # Point message: x=voltage, y=level, z=low_battery (0.0 or 1.0)
-        self.low_battery = (msg.z > 0.5)
-        if self.low_battery and self.state == 'drawing':
-            self.get_logger().warn('low battery detected, transitioning to docking')
-            self.state = 'docking'
-            self.start_docking()
     
     def docking_cmd_callback(self, msg):
         if self.state == 'docking':

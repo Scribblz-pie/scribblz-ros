@@ -15,6 +15,10 @@ import threading
 import time
 from collections import deque, defaultdict
 
+# Throttling for error messages (print at most once per 10 seconds per error type)
+_error_message_times = {}
+_error_message_interval = 10.0  # seconds
+
 
 def parse_lidar_packet(data):
     """
@@ -28,15 +32,21 @@ def parse_lidar_packet(data):
     """
     try:
         if len(data) < 32:
+            error_key = f"small_{len(data)}"
+            now = time.time()
+            if error_key not in _error_message_times or (now - _error_message_times[error_key]) > _error_message_interval:
+                print(f"[Parser] Packet too small: {len(data)} bytes")
+                _error_message_times[error_key] = now
             return None
-        print(f"[Parser] Packet too small: {len(data)} bytes")
         
         header = struct.unpack_from("<H", data, 0)[0]
         if header != 0xFAC7:
+            error_key = f"bad_header_{header:#06x}"
+            now = time.time()
+            if error_key not in _error_message_times or (now - _error_message_times[error_key]) > _error_message_interval:
+                print(f"[Parser] Bad header: {header:#06x}, expected 0xFAC7, size={len(data)} bytes (throttled)")
+                _error_message_times[error_key] = now
             return None
-        
-        # after: if header != 0xFAC7:
-        print(f"[Parser] Bad header: {header:#06x}, size={len(data)}")
 
         num_points = struct.unpack_from("<H", data, 2)[0]
         start_angle = struct.unpack_from("<I", data, 8)[0] / 1000.0
@@ -73,7 +83,10 @@ def parse_lidar_packet(data):
 
         abs_angles = [(start_angle + ra) % 360.0 for ra in rel_angles]
         return abs_angles, distances, intensities
-    except Exception:
+    except Exception as e:
+        print(f"[Parser] Exception during parsing: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -117,7 +130,10 @@ class LidarReceiver(threading.Thread):
                 break
 
             pkt_cnt += 1
-            print(f"[Receiver] Got UDP packet #{pkt_cnt} from {addr}, size={len(data)} bytes")
+            # Only print every 100 packets to reduce spam
+            if pkt_cnt % 100 == 0:
+                print(f"[Receiver] Received {pkt_cnt} packets from {addr}, latest size={len(data)} bytes")
+            
             parsed = parse_lidar_packet(data)
             if parsed is None:
                 continue
