@@ -143,18 +143,24 @@ class PathFollowerNode(Node):
             self.stop_execution()
     
     def pose_callback(self, msg: PoseStamped):
-        """Update current position from odometry/localization."""
+        """Update current position from odometry/localization.
+        
+        Note: Position is kept in lidar/map frame to match waypoint frame.
+        The frame relationship is: Lidar +x = Robot -y (90 degree rotation).
+        """
+        # Keep position in lidar/map frame (same as waypoint frame)
         self.current_x = msg.pose.position.x
         self.current_y = msg.pose.position.y
         
         # Extract yaw from quaternion if available
+        # Note: If quaternion represents orientation in lidar frame, we may need to adjust
         qz = msg.pose.orientation.z
         qw = msg.pose.orientation.w
         if qz != 0.0 or qw != 0.0:
             self.current_yaw = 2.0 * math.atan2(qz, qw)
         
         if not self.has_pose:
-            self.get_logger().info(f'First pose received: ({self.current_x:.3f}, {self.current_y:.3f}, yaw={self.current_yaw:.3f})')
+            self.get_logger().info(f'First pose received (map/lidar frame): ({self.current_x:.3f}, {self.current_y:.3f}, yaw={self.current_yaw:.3f})')
             self.has_pose = True
     
     def imu_callback(self, msg: Imu):
@@ -295,14 +301,20 @@ class PathFollowerNode(Node):
             self.publish_progress()
             return
         
-        # Transform position error from global frame to robot body frame
+        # Transform position error from lidar/map frame to robot body frame
+        # Frame relationship: Lidar +x = Robot -y (90 degree rotation)
+        # Step 1: Transform from lidar frame to robot base frame
+        # Robot x = Lidar y, Robot y = -Lidar x
+        dx_robot_base = dy_global  # Lidar y -> Robot x
+        dy_robot_base = -dx_global  # -Lidar x -> Robot y
+        
+        # Step 2: Rotate by robot's current yaw to get body frame error
         # Body frame: x = forward, y = left (lateral)
         cos_yaw = math.cos(self.current_yaw)
         sin_yaw = math.sin(self.current_yaw)
         
-        # Rotate global error to body frame
-        forward_error = cos_yaw * dx_global + sin_yaw * dy_global
-        lateral_error = -sin_yaw * dx_global + cos_yaw * dy_global
+        forward_error = cos_yaw * dx_robot_base + sin_yaw * dy_robot_base
+        lateral_error = -sin_yaw * dx_robot_base + cos_yaw * dy_robot_base
         
         # Heading error is already in global frame, but we use it directly
         heading_error = heading_error_global
@@ -336,12 +348,16 @@ class PathFollowerNode(Node):
         self.prev_heading_error = heading_error
         
         # Publish chassis velocities
-        # Note: The kinematics node expects world-frame velocities in linear.x and linear.y
-        # So we need to transform body-frame velocities back to world frame
-        vx_world = cos_yaw * forward_vel - sin_yaw * lateral_vel
-        vy_world = sin_yaw * forward_vel + cos_yaw * lateral_vel
+        # Transform from robot body frame to robot world frame
+        vx_robot_world = cos_yaw * forward_vel - sin_yaw * lateral_vel
+        vy_robot_world = sin_yaw * forward_vel + cos_yaw * lateral_vel
         
-        self.publish_velocity(vx_world, vy_world, angular_vel)
+        # Transform from robot world frame to lidar/map frame
+        # Frame relationship: Lidar +x = Robot -y, so: Lidar x = Robot world y, Lidar y = -Robot world x
+        vx_lidar = vy_robot_world  # Robot world y -> Lidar x
+        vy_lidar = -vx_robot_world  # -Robot world x -> Lidar y
+        
+        self.publish_velocity(vx_lidar, vy_lidar, angular_vel)
         self.publish_progress()
     
     def publish_velocity(self, vx: float, vy: float, omega: float):

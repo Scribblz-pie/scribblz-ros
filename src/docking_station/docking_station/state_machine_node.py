@@ -155,7 +155,7 @@ class StateMachineNode(Node):
     def is_valid_transition(self, from_state, to_state):
         if to_state == 'teleop' or to_state == 'error':
             return True
-        if from_state == 'teleop' and to_state == 'docked':
+        if from_state == 'teleop' and (to_state == 'docked' or to_state == 'drawing'):
             return True
         if from_state == 'error' and to_state == 'recovering':
             return True
@@ -163,7 +163,7 @@ class StateMachineNode(Node):
             return True
         if from_state == 'docked' and to_state == 'drawing':
             return True
-        if from_state == 'drawing' and to_state == 'docking':
+        if from_state == 'drawing' and (to_state == 'docking' or to_state == 'teleop' or to_state == 'docked'):
             return True
         if from_state == 'docking' and to_state == 'docked':
             return True
