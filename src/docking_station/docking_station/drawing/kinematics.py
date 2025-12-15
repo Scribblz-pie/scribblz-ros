@@ -115,8 +115,8 @@ class KinematicsNode(Node):
             return
         
         # Get world-frame velocities
-        vx_world = msg.linear.x
-        vy_world = msg.linear.y
+        vx_world = -msg.linear.y
+        vy_world = -msg.linear.x
         
         # Transform to body frame
         vx_body, vy_body = self.world_to_body_velocity(vx_world, vy_world, self.current_orientation)
