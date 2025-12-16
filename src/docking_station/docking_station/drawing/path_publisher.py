@@ -22,6 +22,10 @@ class PathPublisherNode(Node):
         self.declare_parameter('num_waypoints', 10)  # Number of waypoints for line
         self.declare_parameter('target_x', 0.5)  # Direct target X coordinate (overrides direction/length for single)
         self.declare_parameter('target_y', 0.0)  # Direct target Y coordinate (overrides direction/length for single)
+        self.declare_parameter('target_yaw', 0.0)  # Target orientation in degrees (robot heading at waypoint)
+        self.declare_parameter('start_x', 0.0)  # Starting X position (offset for shapes)
+        self.declare_parameter('start_y', 0.0)  # Starting Y position (offset for shapes)
+        self.declare_parameter('start_yaw', 0.0)  # Starting orientation in degrees
         self.declare_parameter('auto_publish', True)  # Publish immediately on startup
         self.declare_parameter('delay', 2.0)  # Delay before publishing (seconds)
         
@@ -31,62 +35,77 @@ class PathPublisherNode(Node):
         num_waypoints = self.get_parameter('num_waypoints').get_parameter_value().integer_value
         target_x = self.get_parameter('target_x').get_parameter_value().double_value
         target_y = self.get_parameter('target_y').get_parameter_value().double_value
+        target_yaw = self.get_parameter('target_yaw').get_parameter_value().double_value
+        start_x = self.get_parameter('start_x').get_parameter_value().double_value
+        start_y = self.get_parameter('start_y').get_parameter_value().double_value
+        start_yaw = self.get_parameter('start_yaw').get_parameter_value().double_value
         auto_publish = self.get_parameter('auto_publish').get_parameter_value().bool_value
         delay = self.get_parameter('delay').get_parameter_value().double_value
         
         # Publisher
         self.path_pub = self.create_publisher(Path, '/execute_drawing_path', 10)
         
-        self.get_logger().info(f'Path publisher initialized: type={path_type}, length={length}m, direction={direction}, target=({target_x}, {target_y})')
+        self.get_logger().debug(f'Path publisher initialized: type={path_type}, length={length}m, direction={direction}, start=({start_x}, {start_y}), target=({target_x}, {target_y}, yaw={target_yaw}°)')
         
         if auto_publish:
             # Wait a bit for subscribers to connect, then publish
-            self.create_timer(delay, lambda: self.publish_path_once(path_type, length, direction, num_waypoints, target_x, target_y))
+            self.create_timer(delay, lambda: self.publish_path_once(path_type, length, direction, num_waypoints, target_x, target_y, target_yaw, start_x, start_y, start_yaw))
     
-    def publish_path_once(self, path_type, length, direction, num_waypoints, target_x, target_y):
+    def publish_path_once(self, path_type, length, direction, num_waypoints, target_x, target_y, target_yaw, start_x, start_y, start_yaw):
         """Publish path once and cancel timer."""
-        waypoints = self.generate_path(path_type, length, direction, num_waypoints, target_x, target_y)
+        waypoints = self.generate_path(path_type, length, direction, num_waypoints, target_x, target_y, target_yaw, start_x, start_y, start_yaw)
         self.publish_path(waypoints)
         # Cancel the timer by creating a new one that never fires
         # Actually, we can't easily cancel, but this will only fire once anyway
     
-    def generate_path(self, path_type, length, direction, num_waypoints, target_x, target_y):
-        """Generate waypoints for different path types."""
+    def generate_path(self, path_type, length, direction, num_waypoints, target_x, target_y, target_yaw, start_x, start_y, start_yaw):
+        """Generate waypoints for different path types.
+        
+        Args:
+            target_yaw: Target orientation in degrees (converted to radians internally)
+            start_x, start_y: Starting position offset
+            start_yaw: Starting orientation in degrees
+        """
         waypoints = []
+        target_yaw_rad = math.radians(target_yaw)  # Convert degrees to radians
+        start_yaw_rad = math.radians(start_yaw)  # Convert degrees to radians
         
         if path_type == 'line':
-            # Generate a line path
+            # Generate a line path starting from (start_x, start_y)
             dx, dy = self.get_direction_vector(direction, length)
             
             if num_waypoints == 1:
-                # Single waypoint at the end
-                waypoints.append((dx, dy, 0.0))
+                # Single waypoint at the end with target orientation
+                waypoints.append((start_x + dx, start_y + dy, target_yaw_rad))
             else:
                 # Multiple waypoints along the line
+                # Interpolate orientation from start_yaw to target_yaw
                 for i in range(num_waypoints):
                     t = i / (num_waypoints - 1) if num_waypoints > 1 else 0.0
-                    x = dx * t
-                    y = dy * t
-                    waypoints.append((x, y, 0.0))
+                    x = start_x + dx * t
+                    y = start_y + dy * t
+                    yaw = start_yaw_rad + (target_yaw_rad - start_yaw_rad) * t  # Gradually rotate to target
+                    waypoints.append((x, y, yaw))
         
         elif path_type == 'square':
-            # Generate a square path
+            # Generate a square path starting from (start_x, start_y)
+            # Square corners relative to start position
             side = length
             waypoints = [
-                (0.0, side, 0.0),      # Top-left
-                (side, side, 0.0),     # Top-right
-                (side, 0.0, 0.0),       # Bottom-right
-                (0.0, 0.0, 0.0),       # Back to start
+                (start_x, start_y + side, start_yaw_rad + math.pi/2),    # Top-left, facing right
+                (start_x + side, start_y + side, start_yaw_rad),         # Top-right, facing down
+                (start_x + side, start_y, start_yaw_rad - math.pi/2),   # Bottom-right, facing left
+                (start_x, start_y, start_yaw_rad + math.pi),             # Back to start, facing up
             ]
         
         elif path_type == 'single':
             # Single waypoint (for testing)
-            # Use direct coordinates if provided, otherwise use direction/length
+            # Use direct coordinates if provided, otherwise use direction/length from start
             if target_x != 0.0 or target_y != 0.0:
-                waypoints.append((target_x, target_y, 0.0))
+                waypoints.append((target_x, target_y, target_yaw_rad))
             else:
                 dx, dy = self.get_direction_vector(direction, length)
-                waypoints.append((dx, dy, 0.0))
+                waypoints.append((start_x + dx, start_y + dy, target_yaw_rad))
         
         else:
             self.get_logger().error(f'Unknown path type: {path_type}')
@@ -132,9 +151,9 @@ class PathPublisherNode(Node):
             path_msg.poses.append(pose)
         
         self.path_pub.publish(path_msg)
-        self.get_logger().info(f'Published path with {len(waypoints)} waypoints')
+        self.get_logger().debug(f'Published path with {len(waypoints)} waypoints')
         for i, (x, y, yaw) in enumerate(waypoints):
-            self.get_logger().info(f'  Waypoint {i}: ({x:.3f}, {y:.3f}, yaw={math.degrees(yaw):.1f}°)')
+            self.get_logger().debug(f'  Waypoint {i}: ({x:.3f}, {y:.3f}, yaw={math.degrees(yaw):.1f}°)')
 
 
 def main(args=None):

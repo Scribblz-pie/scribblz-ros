@@ -13,11 +13,12 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
 from geometry_msgs.msg import PoseStamped
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, Imu
 from std_msgs.msg import Header
 import threading
 import math
 from collections import deque
+from scipy.spatial.transform import Rotation
 
 from .packet_parser import LidarReceiver, ScanAssembler
 from .circle_fitter import CircleFitter
@@ -45,8 +46,11 @@ class LidarProcessor(Node):
 
         # Frame IDs
         self.declare_parameter('frame_id', 'map')
-        self.declare_parameter('scan_frame_id', 'lidar')
+        self.declare_parameter('scan_frame_id', 'map')
 
+        # Robot orientation offset (align robot body frame with sensor frame)
+        self.declare_parameter('robot_orientation_offset', -1.5708)
+        
         # Circle fit configuration
         self.declare_parameter('expected_radius_cm', 3.0)
         self.declare_parameter('radius_tolerance_cm', 5.0)
@@ -65,6 +69,7 @@ class LidarProcessor(Node):
         self.frame_id = self.get_parameter('frame_id').get_parameter_value().string_value
         self.scan_frame_id = self.get_parameter('scan_frame_id').get_parameter_value().string_value
         self.print_interval = self.get_parameter('print_interval').get_parameter_value().double_value
+        self.robot_orientation_offset = self.get_parameter('robot_orientation_offset').get_parameter_value().double_value
 
         # Circle fit configuration dict
         self.cfg = {
@@ -81,6 +86,12 @@ class LidarProcessor(Node):
         qos = QoSProfile(depth=10)
         self.scan_pub = self.create_publisher(LaserScan, '/lidar/scan', qos)
         self.pose_pub = self.create_publisher(PoseStamped, '/robot_pose', qos)
+        
+        # Subscribe to IMU data to get orientation
+        self.imu_sub = self.create_subscription(Imu, '/imu/data', self.imu_callback, qos)
+        
+        # Store latest IMU orientation (quaternion)
+        self.imu_orientation = None
 
         # Initialize components
         self.buffer = deque(maxlen=64)
@@ -91,10 +102,19 @@ class LidarProcessor(Node):
 
         # Start receiver thread and processing timer
         self.receiver.start()
-        self.timer = self.create_timer(0.02, self.process_buffer)
+        self.timer = self.create_timer(0.01, self.process_buffer)  # 100Hz for faster pose updates
 
-        self.get_logger().info(f'lidar pose node listening on {self.host}:{self.port}')
+        self.get_logger().debug(f'lidar pose node listening on {self.host}:{self.port}')
 
+    def imu_callback(self, msg: Imu):
+        """
+        Store latest IMU orientation.
+        
+        Args:
+            msg: IMU message containing orientation quaternion
+        """
+        self.imu_orientation = msg.orientation
+    
     def destroy_node(self):
         """Cleanup on node shutdown."""
         self.stop_event.set()
@@ -196,7 +216,9 @@ class LidarProcessor(Node):
 
     def publish_pose(self, circle_fit, ts):
         """
-        Publish robot pose based on detected circle.
+        Publish robot pose based on detected circle with IMU orientation.
+        
+        Position comes from lidar circle detection, orientation from IMU with offset applied.
         
         Args:
             circle_fit: Tuple of (center_x_cm, center_y_cm, radius_cm, inlier_count)
@@ -209,5 +231,27 @@ class LidarProcessor(Node):
         pose.pose.position.x = cx_cm / 100.0  # Convert cm to meters
         pose.pose.position.y = cy_cm / 100.0
         pose.pose.position.z = 0.0
-        pose.pose.orientation.w = 1.0
+        
+        # Use IMU orientation with robot offset applied
+        if self.imu_orientation is not None:
+            # Extract yaw from IMU quaternion
+            quat = [self.imu_orientation.x, self.imu_orientation.y, 
+                   self.imu_orientation.z, self.imu_orientation.w]
+            yaw = Rotation.from_quat(quat).as_euler('xyz')[2]
+            
+            # Negate yaw to fix rotation direction (CW should appear as CW)
+            yaw = -yaw
+            
+            # Apply robot orientation offset
+            corrected_yaw = yaw + self.robot_orientation_offset
+            
+            # Convert back to quaternion
+            corrected_quat = Rotation.from_euler('xyz', [0, 0, corrected_yaw]).as_quat()
+            pose.pose.orientation.x = corrected_quat[0]
+            pose.pose.orientation.y = corrected_quat[1]
+            pose.pose.orientation.z = corrected_quat[2]
+            pose.pose.orientation.w = corrected_quat[3]
+        else:
+            pose.pose.orientation.w = 1.0
+        
         self.pose_pub.publish(pose)

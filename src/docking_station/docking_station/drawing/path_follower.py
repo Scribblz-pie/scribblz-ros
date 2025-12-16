@@ -3,19 +3,24 @@
 Path follower node for kiwi drive robot.
 
 Implements high-level path following by:
-1. Computing position and heading errors in global frame
-2. Transforming errors to robot body frame
-3. Using PID control to compute desired chassis velocities
-4. Publishing chassis velocities (kinematics node converts to wheel velocities)
+1. Using TF2 to transform waypoints from map frame to robot body frame (base_link)
+2. Computing position and heading errors in robot body frame
+3. Using PID control to compute desired chassis velocities in body frame
+4. Publishing body-frame velocities directly (kinematics node converts to wheel velocities)
 """
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String, Empty, Bool, UInt32, Float64
-from geometry_msgs.msg import Twist, PoseStamped
+from geometry_msgs.msg import Twist, PoseStamped, TransformStamped
 from nav_msgs.msg import Path
-from sensor_msgs.msg import Imu
 import math
 from typing import Optional
+import tf2_ros
+from tf2_ros import TransformException, TransformBroadcaster
+from tf2_geometry_msgs import do_transform_pose
+from scipy.spatial.transform import Rotation
+
+
 
 
 class PathFollowerNode(Node):
@@ -27,44 +32,36 @@ class PathFollowerNode(Node):
         # Declare parameters
         self.declare_parameter('waypoint_tolerance', 0.05)  # Distance threshold (m)
         self.declare_parameter('heading_tolerance', 0.1)  # Heading threshold (rad)
-        self.declare_parameter('max_forward_vel', 0.3)  # Max forward velocity (m/s)
-        self.declare_parameter('max_lateral_vel', 0.3)  # Max lateral velocity (m/s)
-        self.declare_parameter('max_angular_vel', 0.5)  # Max angular velocity (rad/s)
+        self.declare_parameter('max_velocity', 1.0)  # Max translation velocity (m/s) - matches teleop
+        self.declare_parameter('max_angular_velocity', 3.0)  # Max angular velocity (rad/s) - matches teleop
         self.declare_parameter('control_frequency', 20.0)  # Control loop frequency (Hz)
         
-        # PID gains for position control (in body frame)
-        self.declare_parameter('kp_forward', 2.0)
-        self.declare_parameter('ki_forward', 0.0)
-        self.declare_parameter('kd_forward', 0.0)
+        # Simplified proportional control parameters
+        self.declare_parameter('control_gain', 0.6)  # Overall control aggressiveness (0-1)
         
-        self.declare_parameter('kp_lateral', 2.0)
-        self.declare_parameter('ki_lateral', 0.0)
-        self.declare_parameter('kd_lateral', 0.0)
+        # Characteristic scales - defines error magnitude for full speed
+        self.declare_parameter('forward_scale', 0.5)  # meters - full speed at 0.5m forward error
+        self.declare_parameter('lateral_scale', 0.5)  # meters - full speed at 0.5m lateral error
+        self.declare_parameter('heading_scale', 1.0)  # radians - full speed at 1 radian (~57°) heading error
         
-        # PID gains for heading control
-        self.declare_parameter('kp_heading', 1.0)
-        self.declare_parameter('ki_heading', 0.0)
-        self.declare_parameter('kd_heading', 0.0)
+        # Dead zone parameters - stop sending commands when very close to target
+        self.declare_parameter('position_dead_zone', 0.03)  # meters - no movement within 3cm
+        self.declare_parameter('heading_dead_zone', 0.08)  # radians - no rotation within ~4.6°
         
         # Get parameter values
         self.waypoint_tolerance = self.get_parameter('waypoint_tolerance').get_parameter_value().double_value
         self.heading_tolerance = self.get_parameter('heading_tolerance').get_parameter_value().double_value
-        self.max_forward_vel = self.get_parameter('max_forward_vel').get_parameter_value().double_value
-        self.max_lateral_vel = self.get_parameter('max_lateral_vel').get_parameter_value().double_value
-        self.max_angular_vel = self.get_parameter('max_angular_vel').get_parameter_value().double_value
+        self.max_velocity = self.get_parameter('max_velocity').get_parameter_value().double_value
+        self.max_angular_velocity = self.get_parameter('max_angular_velocity').get_parameter_value().double_value
         self.control_freq = self.get_parameter('control_frequency').get_parameter_value().double_value
         
-        self.kp_forward = self.get_parameter('kp_forward').get_parameter_value().double_value
-        self.ki_forward = self.get_parameter('ki_forward').get_parameter_value().double_value
-        self.kd_forward = self.get_parameter('kd_forward').get_parameter_value().double_value
+        self.control_gain = self.get_parameter('control_gain').get_parameter_value().double_value
+        self.forward_scale = self.get_parameter('forward_scale').get_parameter_value().double_value
+        self.lateral_scale = self.get_parameter('lateral_scale').get_parameter_value().double_value
+        self.heading_scale = self.get_parameter('heading_scale').get_parameter_value().double_value
         
-        self.kp_lateral = self.get_parameter('kp_lateral').get_parameter_value().double_value
-        self.ki_lateral = self.get_parameter('ki_lateral').get_parameter_value().double_value
-        self.kd_lateral = self.get_parameter('kd_lateral').get_parameter_value().double_value
-        
-        self.kp_heading = self.get_parameter('kp_heading').get_parameter_value().double_value
-        self.ki_heading = self.get_parameter('ki_heading').get_parameter_value().double_value
-        self.kd_heading = self.get_parameter('kd_heading').get_parameter_value().double_value
+        self.position_dead_zone = self.get_parameter('position_dead_zone').get_parameter_value().double_value
+        self.heading_dead_zone = self.get_parameter('heading_dead_zone').get_parameter_value().double_value
         
         # Initialize state
         self.current_state = 'docked'
@@ -83,14 +80,8 @@ class PathFollowerNode(Node):
         self.current_yaw = 0.0
         self.has_pose = False
         
-        # PID state
+        # Control state
         self.dt = 1.0 / self.control_freq
-        self.prev_forward_error = 0.0
-        self.prev_lateral_error = 0.0
-        self.prev_heading_error = 0.0
-        self.integral_forward = 0.0
-        self.integral_lateral = 0.0
-        self.integral_heading = 0.0
         
         # Setup subscribers
         self.path_sub = self.create_subscription(
@@ -105,18 +96,23 @@ class PathFollowerNode(Node):
         self.pose_sub = self.create_subscription(
             PoseStamped, '/robot_pose', self.pose_callback, 10)
         
-        self.imu_sub = self.create_subscription(
-            Imu, '/imu/data', self.imu_callback, 10)
-        
         # Setup publishers
         self.cmd_vel_pub = self.create_publisher(Twist, '/drawing/cmd_vel', 1)
         self.progress_pub = self.create_publisher(Float64, '/drawing/feedback/progress', 1)
         self.waypoint_index_pub = self.create_publisher(UInt32, '/drawing/feedback/waypoint_index', 1)
         
+        # Setup TF2 transform listener and broadcaster
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.tf_broadcaster = TransformBroadcaster(self)
+        
         # Control timer
         self.control_timer = None
         
-        self.get_logger().info('Path follower node initialized')
+        # Status logging timer (runs continuously regardless of state)
+        self.create_timer(1.0, self.status_logging_callback)  # 1 Hz status updates
+        
+        self.get_logger().info('Path follower node initialized with TF2 support')
     
     def state_callback(self, msg: String):
         """Handle robot state changes."""
@@ -145,30 +141,36 @@ class PathFollowerNode(Node):
     def pose_callback(self, msg: PoseStamped):
         """Update current position from odometry/localization.
         
-        Note: Position is kept in lidar/map frame to match waypoint frame.
-        The frame relationship is: Lidar +x = Robot -y (90 degree rotation).
+        Pose is received in map frame. We'll transform it to base_link frame
+        when needed using TF2. Also publish the transform from map to base_link.
         """
-        # Keep position in lidar/map frame (same as waypoint frame)
+        # Store pose in map frame (will transform to base_link when needed)
         self.current_x = msg.pose.position.x
         self.current_y = msg.pose.position.y
         
-        # Extract yaw from quaternion if available
-        # Note: If quaternion represents orientation in lidar frame, we may need to adjust
-        qz = msg.pose.orientation.z
-        qw = msg.pose.orientation.w
-        if qz != 0.0 or qw != 0.0:
-            self.current_yaw = 2.0 * math.atan2(qz, qw)
+        # Extract yaw from quaternion using proper conversion
+        quat = [msg.pose.orientation.x, msg.pose.orientation.y,
+                msg.pose.orientation.z, msg.pose.orientation.w]
+        self.current_yaw = Rotation.from_quat(quat).as_euler('xyz')[2]
+        
+        # Publish transform from map to base_link
+        # Orientation is already corrected in /robot_pose by lidar_pose node
+        transform = TransformStamped()
+        transform.header.stamp = self.get_clock().now().to_msg()
+        transform.header.frame_id = 'map'
+        transform.child_frame_id = 'base_link'
+        transform.transform.translation.x = msg.pose.position.x
+        transform.transform.translation.y = msg.pose.position.y
+        transform.transform.translation.z = msg.pose.position.z
+        transform.transform.rotation = msg.pose.orientation
+        self.tf_broadcaster.sendTransform(transform)
         
         if not self.has_pose:
-            self.get_logger().info(f'First pose received (map/lidar frame): ({self.current_x:.3f}, {self.current_y:.3f}, yaw={self.current_yaw:.3f})')
+            self.get_logger().info(
+                f'First pose received: pos=({self.current_x:.3f}, {self.current_y:.3f}), '
+                f'yaw={math.degrees(self.current_yaw):.1f}°'
+            )
             self.has_pose = True
-    
-    def imu_callback(self, msg: Imu):
-        """Update current orientation from IMU."""
-        qz = msg.orientation.z
-        qw = msg.orientation.w
-        self.current_yaw = 2.0 * math.atan2(qz, qw)
-        self.has_pose = True  # Consider IMU as pose source
     
     def path_callback(self, msg: Path):
         """Handle new path received."""
@@ -214,14 +216,6 @@ class PathFollowerNode(Node):
         self.cancel_requested = False
         self.current_waypoint_idx = 0
         
-        # Reset PID controllers
-        self.prev_forward_error = 0.0
-        self.prev_lateral_error = 0.0
-        self.prev_heading_error = 0.0
-        self.integral_forward = 0.0
-        self.integral_lateral = 0.0
-        self.integral_heading = 0.0
-        
         # Start control loop
         self.control_timer = self.create_timer(self.dt, self.control_loop)
     
@@ -244,8 +238,134 @@ class PathFollowerNode(Node):
         self.executing = False
         self.current_waypoint_idx = 0
     
+    def status_logging_callback(self):
+        """Continuous status logging (runs regardless of state)."""
+        if not self.has_pose:
+            return
+        
+        # Always log current pose
+        self.get_logger().debug(
+            f'[STATUS] State: {self.current_state} | Pose: ({self.current_x:.3f}, {self.current_y:.3f}), yaw={math.degrees(self.current_yaw):.1f}°'
+        )
+        
+        # If we have a stored path, log errors to the current/next waypoint
+        if self.stored_path is not None and len(self.stored_path.poses) > 0:
+            target_idx = self.current_waypoint_idx if self.executing else 0
+            if target_idx < len(self.stored_path.poses):
+                target_pose = self.stored_path.poses[target_idx]
+                
+                # Transform waypoint from map frame to base_link frame using TF2
+                waypoint_in_base_link = self.transform_waypoint_to_base_link(target_pose)
+                
+                # Calculate errors in map frame for logging
+                x_error = target_pose.pose.position.x - self.current_x
+                y_error = target_pose.pose.position.y - self.current_y
+                
+                # Fallback to manual transformation if TF2 fails
+                if waypoint_in_base_link is None:
+                    # Extract target yaw
+                    target_q = target_pose.pose.orientation
+                    target_yaw = 2.0 * math.atan2(target_q.z, target_q.w) if (target_q.z != 0.0 or target_q.w != 0.0) else self.current_yaw
+                    # Use atan2 method to always pick shortest rotation path and avoid ±180° discontinuity
+                    angle_diff = target_yaw - self.current_yaw
+                    heading_error = math.atan2(math.sin(angle_diff), math.cos(angle_diff))
+                    
+                    # Transform to robot frame manually
+                    cos_yaw = math.cos(self.current_yaw)
+                    sin_yaw = math.sin(self.current_yaw)
+                    forward_error = cos_yaw * x_error + sin_yaw * y_error
+                    lateral_error = -sin_yaw * x_error + cos_yaw * y_error
+                else:
+                    # TF2 transformation successful - errors are the transformed coordinates
+                    forward_error = waypoint_in_base_link[0]
+                    lateral_error = waypoint_in_base_link[1]
+                    heading_error = waypoint_in_base_link[2]
+                
+                self.get_logger().debug(
+                    f'[STATUS] WP[{target_idx}]: target=({target_pose.pose.position.x:.3f}, {target_pose.pose.position.y:.3f})'
+                )
+                self.get_logger().debug(
+                    f'[STATUS] MAP ERRORS: x={x_error:.3f}m, y={y_error:.3f}m'
+                )
+                self.get_logger().debug(
+                    f'[STATUS] BASE_LINK ERRORS (TF2): fwd={forward_error:.3f}m, lat={lateral_error:.3f}m, hdg={math.degrees(heading_error):.1f}°'
+                )
+    
+    def get_robot_pose_in_base_link(self) -> Optional[tuple]:
+        """Get current robot pose in base_link frame using TF2.
+        
+        Returns:
+            Tuple of (x, y, yaw) in base_link frame, or None if transform unavailable
+        """
+        try:
+            # Try to get transform from map to base_link
+            transform = self.tf_buffer.lookup_transform(
+                'base_link',  # target frame
+                'map',  # source frame
+                rclpy.time.Time()
+            )
+            
+            # Extract position
+            x = transform.transform.translation.x
+            y = transform.transform.translation.y
+            
+            # Extract yaw from quaternion
+            q = transform.transform.rotation
+            yaw = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_euler('xyz')[2]
+            
+            return (x, y, yaw)
+        except TransformException as ex:
+            # If transform not available, try using current pose and IMU yaw
+            # This is a fallback for when TF2 transform isn't set up yet
+            if self.has_pose:
+                # Use stored pose (in map frame) - will need manual transform
+                # For now, return None to indicate we should use fallback
+                return None
+            return None
+    
+    def transform_waypoint_to_base_link(self, waypoint_pose: PoseStamped) -> Optional[tuple]:
+        """Transform waypoint from map frame to base_link frame using TF2.
+        
+        Args:
+            waypoint_pose: PoseStamped in map frame
+            
+        Returns:
+            Tuple of (x, y, yaw) in base_link frame, or None if transform fails
+            
+        Verification examples:
+        - Robot at (0,0), yaw=0°, waypoint at (1,0) → base_link: (1,0,0) [1m forward]
+        - Robot at (0,0), yaw=90°, waypoint at (0,1) → base_link: (1,0,0) [1m forward]
+        - Robot at (0,0), yaw=180°, waypoint at (1,0) → base_link: (-1,0,0) [1m behind]
+        - Robot at (1,1), yaw=0°, waypoint at (2,1.5) → base_link: (1,0.5,0) [1m forward, 0.5m left]
+        """
+        try:
+            # Use TF2's built-in transformation - it handles all the rotation math for us!
+            # Get transform from map to base_link
+            transform = self.tf_buffer.lookup_transform(
+                'base_link',  # target frame
+                waypoint_pose.header.frame_id,  # source frame (should be 'map')
+                rclpy.time.Time()
+            )
+            
+            # Transform the pose using TF2's built-in utility
+            # This automatically handles translation and rotation transformation
+            transformed_pose = do_transform_pose(waypoint_pose.pose, transform)
+            
+            # Extract transformed position (waypoint in base_link frame)
+            wp_x_base = transformed_pose.position.x
+            wp_y_base = transformed_pose.position.y
+            
+            # Extract transformed orientation
+            wp_q = transformed_pose.orientation
+            wp_yaw_base = Rotation.from_quat([wp_q.x, wp_q.y, wp_q.z, wp_q.w]).as_euler('xyz')[2]
+            
+            return (wp_x_base, wp_y_base, wp_yaw_base)
+        except TransformException as ex:
+            self.get_logger().warn(f'Failed to transform waypoint to base_link: {ex}')
+            return None
+    
     def control_loop(self):
-        """Main control loop - computes errors and publishes velocity commands."""
+        """Main control loop - computes errors in body frame and publishes velocity commands."""
         if not self.executing or not self.active or self.cancel_requested:
             self.stop_execution()
             return
@@ -260,112 +380,161 @@ class PathFollowerNode(Node):
             self.stop_execution()
             return
         
-        # Get current target waypoint
+        # Get target waypoint
         target_pose = self.current_path.poses[self.current_waypoint_idx]
-        target_x = target_pose.pose.position.x
-        target_y = target_pose.pose.position.y
         
-        # Extract target heading from quaternion
-        qz = target_pose.pose.orientation.z
-        qw = target_pose.pose.orientation.w
-        target_yaw = 2.0 * math.atan2(qz, qw) if (qz != 0.0 or qw != 0.0) else self.current_yaw
+        # Transform waypoint from map frame to base_link frame using TF2
+        # Key concept: In base_link frame, robot is at origin (0,0,0), so:
+        #   - forward_error = waypoint.x (distance along robot's forward axis)
+        #   - lateral_error = waypoint.y (distance along robot's lateral axis)
+        #   - heading_error = waypoint.yaw (angular difference)
+        waypoint_in_base_link = self.transform_waypoint_to_base_link(target_pose)
         
-        # Compute errors in global frame
-        dx_global = target_x - self.current_x
-        dy_global = target_y - self.current_y
-        distance = math.sqrt(dx_global**2 + dy_global**2)
+        # Fallback to manual transformation if TF2 fails
+        if waypoint_in_base_link is None:
+            self.get_logger().warn('TF2 transform failed - using fallback manual transformation')
+            
+            # Calculate errors in map frame
+            x_error = target_pose.pose.position.x - self.current_x
+            y_error = target_pose.pose.position.y - self.current_y
+            
+            # Extract target yaw from quaternion
+            target_q = target_pose.pose.orientation
+            target_yaw = 2.0 * math.atan2(target_q.z, target_q.w) if (target_q.z != 0.0 or target_q.w != 0.0) else self.current_yaw
+            # Use atan2 method to always pick shortest rotation path and avoid ±180° discontinuity
+            angle_diff = target_yaw - self.current_yaw
+            heading_error = math.atan2(math.sin(angle_diff), math.cos(angle_diff))
+            
+            # Calculate distance for waypoint completion check
+            distance = math.sqrt(x_error**2 + y_error**2)
+            
+            # Transform map frame errors to robot body frame using rotation
+            cos_yaw = math.cos(self.current_yaw)
+            sin_yaw = math.sin(self.current_yaw)
+            
+            # Rotate error vector from map frame to robot body frame
+            forward_error = cos_yaw * x_error + sin_yaw * y_error
+            lateral_error = -sin_yaw * x_error + cos_yaw * y_error
+            
+            self.get_logger().debug(
+                f'[WP {self.current_waypoint_idx}] FALLBACK: MAP ERRORS: x={x_error:.3f}m, y={y_error:.3f}m'
+            )
+        else:
+            # TF2 transformation successful - errors are the transformed coordinates
+            # Since robot is at origin (0,0,0) in base_link frame:
+            # - forward_error = waypoint.x in base_link
+            # - lateral_error = waypoint.y in base_link
+            # - heading_error = waypoint.yaw in base_link
+            forward_error = waypoint_in_base_link[0]
+            lateral_error = waypoint_in_base_link[1]
+            heading_error = waypoint_in_base_link[2]
+            
+            # Calculate distance for waypoint completion check
+            distance = math.sqrt(forward_error**2 + lateral_error**2)
+            
+            # Calculate map frame errors for logging
+            x_error = target_pose.pose.position.x - self.current_x
+            y_error = target_pose.pose.position.y - self.current_y
         
-        # Compute heading error (normalize to [-pi, pi])
-        heading_error_global = target_yaw - self.current_yaw
-        heading_error_global = self.normalize_angle(heading_error_global)
-        
-        # Check if waypoint reached (distance and heading thresholds)
-        if distance < self.waypoint_tolerance and abs(heading_error_global) < self.heading_tolerance:
+        # Check if waypoint reached
+        if distance < self.waypoint_tolerance and abs(heading_error) < self.heading_tolerance:
             self.get_logger().info(
                 f'Waypoint {self.current_waypoint_idx + 1}/{len(self.current_path.poses)} reached '
-                f'(distance={distance:.3f}, heading_error={math.degrees(heading_error_global):.1f}°)'
+                f'(distance={distance:.3f}m, heading_error={math.degrees(heading_error):.1f}°)'
             )
-            
-            # Advance to next waypoint
             self.current_waypoint_idx += 1
-            
-            # Reset PID controllers for new waypoint
-            self.prev_forward_error = 0.0
-            self.prev_lateral_error = 0.0
-            self.prev_heading_error = 0.0
-            self.integral_forward = 0.0
-            self.integral_lateral = 0.0
-            self.integral_heading = 0.0
-            
-            # Publish progress
             self.publish_progress()
             return
         
-        # Transform position error from lidar/map frame to robot body frame
-        # Frame relationship: Lidar +x = Robot -y (90 degree rotation)
-        # Step 1: Transform from lidar frame to robot base frame
-        # Robot x = Lidar y, Robot y = -Lidar x
-        dx_robot_base = dy_global  # Lidar y -> Robot x
-        dy_robot_base = -dx_global  # -Lidar x -> Robot y
+        # Debug: Log errors in both frames
+        self.get_logger().debug(
+            f'[WP {self.current_waypoint_idx}] MAP FRAME: target=({target_pose.pose.position.x:.3f}, {target_pose.pose.position.y:.3f}) '
+            f'robot=({self.current_x:.3f}, {self.current_y:.3f}, yaw={math.degrees(self.current_yaw):.1f}°)'
+        )
+        self.get_logger().debug(
+            f'[WP {self.current_waypoint_idx}] MAP ERRORS: x_error={x_error:.3f}m, y_error={y_error:.3f}m'
+        )
+        self.get_logger().debug(
+            f'[WP {self.current_waypoint_idx}] BASE_LINK ERRORS (TF2): forward={forward_error:.3f}m, lateral={lateral_error:.3f}m, heading={math.degrees(heading_error):.1f}°'
+        )
         
-        # Step 2: Rotate by robot's current yaw to get body frame error
-        # Body frame: x = forward, y = left (lateral)
-        cos_yaw = math.cos(self.current_yaw)
-        sin_yaw = math.sin(self.current_yaw)
+        # Apply dead zone - zero out errors that are too small to prevent oscillation
+        forward_error_original = forward_error
+        lateral_error_original = lateral_error
+        heading_error_original = heading_error
         
-        forward_error = cos_yaw * dx_robot_base + sin_yaw * dy_robot_base
-        lateral_error = -sin_yaw * dx_robot_base + cos_yaw * dy_robot_base
+        if abs(forward_error) < self.position_dead_zone:
+            forward_error = 0.0
+        if abs(lateral_error) < self.position_dead_zone:
+            lateral_error = 0.0
+        if abs(heading_error) < self.heading_dead_zone:
+            heading_error = 0.0
         
-        # Heading error is already in global frame, but we use it directly
-        heading_error = heading_error_global
+        # If all errors are within dead zone, stop completely
+        if forward_error == 0.0 and lateral_error == 0.0 and heading_error == 0.0:
+            self.get_logger().debug(
+                f'[CONTROL] All errors in dead zone - stopping robot '
+                f'(fwd={forward_error_original:.4f}m, lat={lateral_error_original:.4f}m, hdg={math.degrees(heading_error_original):.2f}°)'
+            )
+            self.publish_velocity(0.0, 0.0, 0.0)
+            return
         
-        # Compute desired chassis velocities using PID control
-        # Forward velocity
-        self.integral_forward += forward_error * self.dt
-        derivative_forward = (forward_error - self.prev_forward_error) / self.dt if self.dt > 0 else 0.0
-        forward_vel = (self.kp_forward * forward_error + 
-                      self.ki_forward * self.integral_forward + 
-                      self.kd_forward * derivative_forward)
-        forward_vel = max(-self.max_forward_vel, min(self.max_forward_vel, forward_vel))
-        self.prev_forward_error = forward_error
+        # Compute desired chassis velocities using normalized proportional control
+        # STEP 1: Normalize errors to [-1, 1] based on characteristic scales
+        forward_norm = max(-1.0, min(1.0, forward_error / self.forward_scale))
+        lateral_norm = max(-1.0, min(1.0, lateral_error / self.lateral_scale))
+        heading_norm = max(-1.0, min(1.0, heading_error / self.heading_scale))
         
-        # Lateral velocity
-        self.integral_lateral += lateral_error * self.dt
-        derivative_lateral = (lateral_error - self.prev_lateral_error) / self.dt if self.dt > 0 else 0.0
-        lateral_vel = (self.kp_lateral * lateral_error + 
-                      self.ki_lateral * self.integral_lateral + 
-                      self.kd_lateral * derivative_lateral)
-        lateral_vel = max(-self.max_lateral_vel, min(self.max_lateral_vel, lateral_vel))
-        self.prev_lateral_error = lateral_error
+        # STEP 2: Apply proportional gain to get desired velocities
+        forward_vel = forward_norm * self.control_gain * self.max_velocity
+        lateral_vel = lateral_norm * self.control_gain * self.max_velocity
+        angular_vel = heading_norm * self.control_gain * self.max_angular_velocity
         
-        # Angular velocity
-        self.integral_heading += heading_error * self.dt
-        derivative_heading = (heading_error - self.prev_heading_error) / self.dt if self.dt > 0 else 0.0
-        angular_vel = (self.kp_heading * heading_error + 
-                      self.ki_heading * self.integral_heading + 
-                      self.kd_heading * derivative_heading)
-        angular_vel = max(-self.max_angular_vel, min(self.max_angular_vel, angular_vel))
-        self.prev_heading_error = heading_error
+        # STEP 3: Proportional saturation - scale all velocities together if any would exceed max
+        # This preserves the direction vector to the waypoint
+        translation_magnitude = math.sqrt(forward_vel**2 + lateral_vel**2)
         
-        # Publish chassis velocities
-        # Transform from robot body frame to robot world frame
-        vx_robot_world = cos_yaw * forward_vel - sin_yaw * lateral_vel
-        vy_robot_world = sin_yaw * forward_vel + cos_yaw * lateral_vel
+        # Normalize angular to same scale for comparison
+        angular_magnitude_normalized = abs(angular_vel) / self.max_angular_velocity * self.max_velocity
         
-        # Transform from robot world frame to lidar/map frame
-        # Frame relationship: Lidar +x = Robot -y, so: Lidar x = Robot world y, Lidar y = -Robot world x
-        vx_lidar = vy_robot_world  # Robot world y -> Lidar x
-        vy_lidar = -vx_robot_world  # -Robot world x -> Lidar y
+        # Find the maximum magnitude
+        max_magnitude = max(translation_magnitude, angular_magnitude_normalized)
         
-        self.publish_velocity(vx_lidar, vy_lidar, angular_vel)
+        # If any velocity would exceed max, scale all proportionally
+        if max_magnitude > self.max_velocity:
+            scale_factor = self.max_velocity / max_magnitude
+            forward_vel *= scale_factor
+            lateral_vel *= scale_factor
+            angular_vel *= scale_factor
+            self.get_logger().debug(f'[CONTROL] Applying proportional saturation: scale_factor={scale_factor:.3f}')
+        
+        # Log normalized errors and control outputs
+        self.get_logger().debug(
+            f'[CONTROL] Normalized errors: fwd={forward_norm:.3f}, lat={lateral_norm:.3f}, hdg={heading_norm:.3f}'
+        )
+        
+        # Debug logging
+        self.get_logger().debug(
+            f'[CONTROL] ROBOT FRAME -> Velocities: vx(forward)={forward_vel:.3f}m/s, vy(lateral)={lateral_vel:.3f}m/s, wz(angular)={angular_vel:.3f}rad/s'
+        )
+        
+        # Publish body-frame velocities directly (like teleop)
+        # vx = forward (robot +x), vy = left (robot +y), wz = rotation
+        self.publish_velocity(forward_vel, lateral_vel, angular_vel)
         self.publish_progress()
     
     def publish_velocity(self, vx: float, vy: float, omega: float):
-        """Publish chassis velocity command."""
+        """Publish chassis velocity command in body frame.
+        
+        Args:
+            vx: Forward velocity (m/s) - positive = forward
+            vy: Lateral velocity (m/s) - positive = left
+            omega: Angular velocity (rad/s) - positive = counterclockwise
+        """
         cmd = Twist()
-        cmd.linear.x = float(vx)
-        cmd.linear.y = float(vy)
-        cmd.angular.z = float(omega)
+        cmd.linear.x = float(vx)  # Forward
+        cmd.linear.y = float(vy)  # Lateral (left)
+        cmd.angular.z = float(omega)  # Angular
         self.cmd_vel_pub.publish(cmd)
     
     def publish_progress(self):
@@ -385,7 +554,12 @@ class PathFollowerNode(Node):
     
     @staticmethod
     def normalize_angle(angle: float) -> float:
-        """Normalize angle to [-pi, pi]."""
+        """Normalize angle to [-pi, pi].
+        
+        Note: For computing angle errors, prefer using atan2(sin(diff), cos(diff))
+        instead, as it avoids discontinuity issues at ±180° and always picks
+        the shortest rotation path.
+        """
         while angle > math.pi:
             angle -= 2.0 * math.pi
         while angle < -math.pi:

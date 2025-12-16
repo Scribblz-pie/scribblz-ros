@@ -14,7 +14,7 @@ setup(
         ('share/' + package_name + '/launch', glob('launch/*.py')),
     ],
 
-    install_requires=['setuptools', 'tf-transformations', 'opencv-python'],
+    install_requires=['setuptools', 'scipy', 'opencv-python'],
     zip_safe=True,
     maintainer='david',
     maintainer_email='david@todo.todo',
@@ -37,6 +37,7 @@ setup(
             'path_publisher = docking_station.drawing.path_publisher:main',
             'docking_action_server = docking_station.docking_action_server_node:main',
             'lidar_pose = docking_station.lidar.lidar_node:main',
+            'tether_controller = docking_station.drawing.tether_controller:main',
         ],
     },
 )

@@ -22,7 +22,7 @@ class KinematicsNode(Node):
         self.use_imu = self.get_parameter('use_imu').get_parameter_value().bool_value
         
         # Load robot parameters from waypoints.json metadata
-        self.robot_radius = 0.1  # default
+        self.robot_radius = .174  # default
         self.marker_offset_x = 0.0
         self.marker_offset_y = 0.0
         self.load_robot_parameters()
@@ -65,7 +65,7 @@ class KinematicsNode(Node):
         self.current_state = 'docked'
         self.active = False
         
-        self.get_logger().info('Kinematics node initialized')
+        self.get_logger().debug('Kinematics node initialized')
     
     def load_robot_parameters(self):
         """Load robot parameters from waypoints.json metadata."""
@@ -82,8 +82,8 @@ class KinematicsNode(Node):
                 self.robot_radius = float(meta.get('robot_radius_l', 0.1))
                 self.marker_offset_x = float(meta.get('marker_offset_x', 0.0))
                 self.marker_offset_y = float(meta.get('marker_offset_y', 0.0))
-                self.get_logger().info(f'Loaded robot parameters: radius={self.robot_radius:.4f}, '
-                                     f'offset=({self.marker_offset_x:.4f}, {self.marker_offset_y:.4f})')
+                self.get_logger().debug(f'Loaded robot parameters: radius={self.robot_radius:.4f}, '
+                                      f'offset=({self.marker_offset_x:.4f}, {self.marker_offset_y:.4f})')
         except Exception as e:
             self.get_logger().error(f'Error loading robot parameters: {e}')
     
@@ -110,23 +110,38 @@ class KinematicsNode(Node):
         self.current_orientation = 2.0 * math.atan2(qz, qw)
     
     def drawing_cmd_callback(self, msg: Twist):
-        """Convert world-frame velocity to wheel velocities."""
+        """Convert body-frame velocity to wheel velocities.
+        
+        Path follower now outputs body-frame velocities directly (x=forward, y=left),
+        so no transform is needed. Just apply inverse kinematics.
+        """
         if not self.active:
             return
         
-        # Get world-frame velocities
-        vx_world = -msg.linear.y
-        vy_world = -msg.linear.x
+        # Get body-frame velocities directly from path_follower
+        # x = forward, y = left (lateral), z = angular
+        vx_body = msg.linear.x  # Forward velocity
+        vy_body = msg.linear.y  # Lateral velocity (left)
+        omega = msg.angular.z   # Angular velocity
         
-        # Transform to body frame
-        vx_body, vy_body = self.world_to_body_velocity(vx_world, vy_world, self.current_orientation)
+        # Debug: Log body frame velocities (input to inverse kinematics)
+        self.get_logger().debug(
+            f'[KINEMATICS INPUT] Body frame velocities: '
+            f'vx={vx_body:.3f}m/s, vy={vy_body:.3f}m/s, omega={omega:.3f}rad/s'
+        )
         
         # Account for marker offset (if marker is moving, compute robot center velocity)
         # For now, assume velocities are already for robot center
         # TODO: Add marker offset compensation if needed
         
         # Compute wheel velocities using inverse kinematics
-        v1, v2, v3 = self.inverse_kinematics(vx_body, vy_body, 0.0)  # omega = 0 for now
+        v1, v2, v3 = self.inverse_kinematics(vx_body, vy_body, omega)
+        
+        # Debug: Log wheel velocities (output from inverse kinematics)
+        self.get_logger().debug(
+            f'[KINEMATICS OUTPUT] Wheel velocities: '
+            f'v1={v1:.3f}m/s, v2={v2:.3f}m/s, v3={v3:.3f}m/s'
+        )
         
         # Publish wheel velocities
         wheel_cmd = Twist()
@@ -150,13 +165,19 @@ class KinematicsNode(Node):
         - Wheel 1: at 90 degrees (pointing up)
         - Wheel 2: at 210 degrees
         - Wheel 3: at 330 degrees
+        
+        Note: Input follows ROS convention (+Y = left), but physical robot wiring
+        has +Y = right, so we negate vy_body to compensate.
         """
         l = self.robot_radius
         sqrt3 = math.sqrt(3.0)
         
-        v1 = vy_body + l * omega
-        v2 = -0.5 * vy_body - (sqrt3 / 2.0) * vx_body + l * omega
-        v3 = -0.5 * vy_body + (sqrt3 / 2.0) * vx_body + l * omega
+        # Negate vy to convert ROS convention (+Y = left) to physical wiring (+Y = right)
+        vy = -vy_body
+        
+        v1 = vy + l * omega
+        v2 = -0.5 * vy - (sqrt3 / 2.0) * vx_body + l * omega
+        v3 = -0.5 * vy + (sqrt3 / 2.0) * vx_body + l * omega
         
         return v1, v2, v3
     

@@ -79,12 +79,12 @@ class ImageProcessorNode(Node):
         # Publisher for the generated path
         self.path_pub = self.create_publisher(Path, '/execute_drawing_path', 10)
         
-        self.get_logger().info('Image processor node initialized, listening on /uploaded_image')
+        self.get_logger().debug('Image processor node initialized, listening on /uploaded_image')
 
     def image_callback(self, msg: Image):
         """Callback for received images."""
         try:
-            self.get_logger().info('Received image, processing...')
+            self.get_logger().debug('Received image, processing...')
             
             # Convert ROS Image to OpenCV format
             if msg.encoding == 'rgb8':
@@ -110,7 +110,7 @@ class ImageProcessorNode(Node):
             # Clean up temp file
             os.unlink(temp_path)
             
-            self.get_logger().info(f'Path generated and published with {len(path_msg.poses)} waypoints')
+            self.get_logger().debug(f'Path generated and published with {len(path_msg.poses)} waypoints')
             
         except Exception as e:
             self.get_logger().error(f'Error processing image: {e}')
@@ -180,8 +180,8 @@ class ImageProcessorNode(Node):
             pose.pose.position.z = 0.0
             
             # Convert yaw to quaternion
-            from tf_transformations import quaternion_from_euler
-            q = quaternion_from_euler(0, 0, wp.theta)
+            from scipy.spatial.transform import Rotation
+            q = Rotation.from_euler('xyz', [0, 0, wp.theta]).as_quat()
             pose.pose.orientation.x = q[0]
             pose.pose.orientation.y = q[1]
             pose.pose.orientation.z = q[2]

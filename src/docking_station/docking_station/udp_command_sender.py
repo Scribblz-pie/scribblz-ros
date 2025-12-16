@@ -75,7 +75,7 @@ class UDPCommandSender(Node):
             self.sock.bind(('192.168.50.1', UDP_PORT))  # Use your actual wlan1 IP
             self.sock.settimeout(0.1)  # Non-blocking read
             
-            self.get_logger().info(f'UDP socket bound to port {UDP_PORT}')
+            self.get_logger().debug(f'UDP socket bound to port {UDP_PORT}')
         except Exception as e:
             self.get_logger().error(f'Failed to create UDP socket: {e}')
             raise
@@ -91,7 +91,7 @@ class UDPCommandSender(Node):
         self.heartbeat_thread.daemon = True
         self.heartbeat_thread.start()
         
-        self.get_logger().info('UDP Bridge Ready.')
+        self.get_logger().debug('UDP Bridge Ready.')
     
     # ============================================================
     # COMMAND CALLBACKS (Send data TO Arduino)
@@ -117,7 +117,7 @@ class UDPCommandSender(Node):
         self.calib_msg_count += 1
         self.current_yaw = 0.0
         self.last_imu_time = None
-        self.get_logger().info('IMU yaw reset to 0°')
+        self.get_logger().debug('IMU yaw reset to 0°')
 
     def marker_callback(self, msg: Bool):
         """Send marker state (Firmware update required to support this)"""
@@ -201,8 +201,11 @@ class UDPCommandSender(Node):
                 dt = current_time_sec - self.last_imu_time
                 if 0 < dt < 1.0:  # Sanity check: dt between 0 and 1 second
                     self.current_yaw += gz_rad_per_sec * dt
-                    # Normalize to [0, 2π]
-                    self.current_yaw = self.current_yaw % (2.0 * math.pi)
+                    # Normalize to [-π, π] to match path_follower expectations
+                    while self.current_yaw > math.pi:
+                        self.current_yaw -= 2.0 * math.pi
+                    while self.current_yaw < -math.pi:
+                        self.current_yaw += 2.0 * math.pi
             else:
                 self.current_yaw = 0.0
             
@@ -244,7 +247,7 @@ class UDPCommandSender(Node):
             
             if self.imu_msg_count % 50 == 0:
                 yaw_deg = math.degrees(self.current_yaw)
-                self.get_logger().info(f'[IMU #{self.imu_msg_count}] Yaw: {yaw_deg:.2f}°')
+                self.get_logger().debug(f'[IMU #{self.imu_msg_count}] Yaw: {yaw_deg:.2f}°')
         
         except (ValueError, IndexError) as e:
             self.get_logger().error(f"IMU Parse Error: {e}")

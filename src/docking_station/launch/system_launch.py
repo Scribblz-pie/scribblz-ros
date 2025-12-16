@@ -10,7 +10,7 @@ def generate_launch_description():
         name='teleop_node',
         output='screen',
         parameters=[{'base_length': 0.1}],  # Adjust based on your robot
-        arguments=['--ros-args', '--log-level', 'debug']
+        arguments=['--ros-args', '--log-level', 'info']
     )
 
     # UDP command sender (sends motor commands to Arduino)
@@ -19,7 +19,7 @@ def generate_launch_description():
         executable='udp_command_sender',
         name='udp_command_sender',
         output='screen',
-        arguments=['--ros-args', '--log-level', 'debug']
+        arguments=['--ros-args', '--log-level', 'info']
     )
 
     # Foxglove bridge
@@ -129,16 +129,32 @@ def generate_launch_description():
             'start_filter_angle': 0.0,
             'end_filter_angle': 360.0,
             'frame_id': 'map',
-            'scan_frame_id': 'lidar',
+            'scan_frame_id': 'map',
             'print_interval': 2.0,
+            'robot_orientation_offset': -1.5708,  # -90° (or 270°) - robot forward alignment
             'expected_radius_cm': 3.0,
             'radius_tolerance_cm': 5.0,
             'min_circle_points': 3,
-            'ransac_iterations': 50,
+            'ransac_iterations': 25,  # Reduced from 50 for faster processing with early termination
             'inlier_threshold_cm': 2.0,
             'min_detection_distance_cm': 5.0,
             'max_detection_distance_cm': 500.0
         }]
+    )
+
+    # Static transform: odom → map (defines map as child of odom for TF tree)
+    # This gives us a root frame (odom) that Foxglove can use
+    # 180° rotation around x-axis to flip z-axis (view from top instead of bottom)
+    odom_to_map_transform = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='odom_to_map_tf',
+        arguments=[
+            '0', '0', '0',  # translation
+            '1', '0', '0', '0',  # 180° rotation around x-axis
+            'odom',  # parent frame (root)
+            'map'  # child frame (docking station/lidar coordinate system)
+        ]
     )
 
     return LaunchDescription([
@@ -151,5 +167,6 @@ def generate_launch_description():
         image_processor_node,
         path_follower_node,
         docking_action_server_node,
-        lidar_pose_node
+        lidar_pose_node,
+        odom_to_map_transform
     ])
