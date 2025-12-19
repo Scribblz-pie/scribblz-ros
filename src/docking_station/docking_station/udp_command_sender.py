@@ -8,12 +8,15 @@ import socket
 import threading
 import math
 import time
+import os
+import csv
 
 # --- CONFIGURATION ---
 UDP_PORT = 54322
 # Broadcast allows sending to the Arduino without knowing its dynamic IP.
 # However, the Arduino will ONLY reply to the specific IP defined in its firmware (192.168.34.201).
-ARDUINO_IP = '255.255.255.255' 
+ARDUINO_IP = '255.255.255.255'
+
 
 class UDPCommandSender(Node):
     def __init__(self):
@@ -28,6 +31,10 @@ class UDPCommandSender(Node):
         # IMU integration state
         self.current_yaw = 0.0
         self.last_imu_time = None
+
+        # IMU logging (orientation.z over time)
+        self.imu_log_path = os.path.expanduser('~/imu_orientation_log.csv')
+        self.imu_log_header_written = False
         
         # === SUBSCRIBERS (Commands to send to Arduino) ===
         self.cmd_subscriber = self.create_subscription(
@@ -52,15 +59,19 @@ class UDPCommandSender(Node):
             1
         )
         
-        # Note: The provided Arduino firmware currently does NOT have handlers for 
-        # MARKER or MARKER_ANGLE, but these are kept for ROS compatibility.
+        # Marker control: /marker (Bool) -> MARKER <pulse_us> for servo
         self.marker_subscriber = self.create_subscription(
             Bool, '/marker', self.marker_callback, 1
         )
-        self.marker_angle_subscriber = self.create_subscription(
-            Float64, '/marker_angle', self.marker_angle_callback, 1
-        )
         
+        # === IMU FILTER STATE ===
+        # Simple first-order low-pass (exponential moving average) for acceleration
+        self.acc_x_filtered = 0.0
+        self.acc_y_filtered = 0.0
+        self.acc_z_filtered = 0.0
+        # Smoothing factors in (0, 1]; lower = more smoothing (more lag, less noise)
+        self.acc_filter_alpha = 0.2
+
         # === PUBLISHERS (Data FROM Arduino) ===
         self.imu_publisher = self.create_publisher(Imu, '/imu/data', 10)
         
@@ -120,13 +131,20 @@ class UDPCommandSender(Node):
         self.get_logger().debug('IMU yaw reset to 0°')
 
     def marker_callback(self, msg: Bool):
-        """Send marker state (Firmware update required to support this)"""
-        marker_val = 1 if msg.data else 0
-        self._send_udp(f"MARKER {marker_val}")
+        """Send marker servo pulse in microseconds via MARKER command.
 
-    def marker_angle_callback(self, msg: Float64):
-        """Send marker angle (Firmware update required to support this)"""
-        self._send_udp(f"MARKER_ANGLE {msg.data:.2f}")
+        The Arduino firmware expects:
+            MARKER <pulse_us>
+        where <pulse_us> is a servo pulse width in microseconds, typically 1000–2000.
+
+        For compatibility with the /marker Bool topic:
+        - True  -> marker down (max pulse)
+        - False -> marker up (min pulse)
+        """
+        pulse_min_us = 1000
+        pulse_max_us = 2000
+        pulse = pulse_max_us if msg.data else pulse_min_us
+        self._send_udp(f"MARKER {pulse}")
     
     def _send_udp(self, cmd_str):
         """Helper to send UDP packets."""
@@ -176,17 +194,17 @@ class UDPCommandSender(Node):
             
             self.imu_msg_count += 1
             
-            # Parse values
-            ax = float(parts[1])
-            ay = float(parts[2])
-            az = float(parts[3])
+            # Parse raw values
+            ax_raw = float(parts[1])
+            ay_raw = float(parts[2])
+            az_raw = float(parts[3])
             gx = float(parts[4])
             gy = float(parts[5])
             gz = float(parts[6])  # deg/s
             
             # Convert gyro Z from deg/s to rad/s
             gz_rad_per_sec = gz * math.pi / 180.0
-            
+
             # Deadzone to prevent drift when stationary
             DEADZONE_THRESHOLD = 0.02  # rad/s (~1.15 deg/s)
             if abs(gz_rad_per_sec) < DEADZONE_THRESHOLD:
@@ -232,17 +250,37 @@ class UDPCommandSender(Node):
             imu_msg.angular_velocity.y = 0.0
             imu_msg.angular_velocity.z = gz_rad_per_sec
             
-            # Linear acceleration (convert g to m/s²)
-            imu_msg.linear_acceleration.x = ax * 9.81
-            imu_msg.linear_acceleration.y = ay * 9.81
-            imu_msg.linear_acceleration.z = az * 9.81
+            # Low-pass filter linear acceleration (optional, reduces vibration spikes)
+            self.acc_x_filtered += self.acc_filter_alpha * (ax_raw - self.acc_x_filtered)
+            self.acc_y_filtered += self.acc_filter_alpha * (ay_raw - self.acc_y_filtered)
+            self.acc_z_filtered += self.acc_filter_alpha * (az_raw - self.acc_z_filtered)
+
+            # Linear acceleration (convert g to m/s²) using filtered values
+            imu_msg.linear_acceleration.x = self.acc_x_filtered * 9.81
+            imu_msg.linear_acceleration.y = self.acc_y_filtered * 9.81
+            imu_msg.linear_acceleration.z = self.acc_z_filtered * 9.81
             
             # Covariances
             imu_msg.orientation_covariance = [0.0] * 9
             imu_msg.orientation_covariance[8] = 0.01  # Yaw uncertainty
             imu_msg.angular_velocity_covariance = [0.0] * 9
             imu_msg.linear_acceleration_covariance = [0.0] * 9
-            
+
+            # Log yaw (self.current_yaw) to CSV for offline analysis
+            try:
+                file_exists = os.path.exists(self.imu_log_path)
+                with open(self.imu_log_path, mode='a', newline='') as f:
+                    writer = csv.writer(f)
+                    if not file_exists or os.path.getsize(self.imu_log_path) == 0:
+                        # Header: time [s], yaw [rad], yaw_deg [deg]
+                        writer.writerow(['time_sec', 'yaw_rad', 'yaw_deg'])
+                    yaw_rad = self.current_yaw
+                    yaw_deg = math.degrees(yaw_rad)
+                    writer.writerow([current_time_sec, yaw_rad, yaw_deg])
+            except Exception as e:
+                # Non-fatal: just log once in debug
+                self.get_logger().debug(f'Failed to write IMU log: {e}')
+
             self.imu_publisher.publish(imu_msg)
             
             if self.imu_msg_count % 50 == 0:

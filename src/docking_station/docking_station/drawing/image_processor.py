@@ -29,21 +29,28 @@ from docking_station.path_pipeline.holonomic_motion import (
     optimize_waypoints_for_pure_translation,
 )
 
-# Constants (copied from path_sim_graph_eulerian.py)
-# Moved to instance variables with ROS parameters
-
 
 class ImageProcessorNode(Node):
     def __init__(self):
         super().__init__('image_processor')
         
-        # Declare parameters
-        self.declare_parameter('dock_position_x', 1.05)
-        self.declare_parameter('dock_position_y', 1.05)
-        self.declare_parameter('dock_approach_x', 1.05)
-        self.declare_parameter('dock_approach_y', 0.95)
-        self.declare_parameter('dock_orientation', math.pi)
-        self.declare_parameter('target_canvas_width', 1.0)
+        # --- UPDATED DEFAULTS WITH YOUR SPECIFIC COORDINATES ---
+        # DOCKED: x = -.1174, y = .5243, orientation = -90 (-pi/2)
+        self.declare_parameter('dock_position_x', -0.1174)
+        self.declare_parameter('dock_position_y', 0.5243)
+        
+        # APPROACH: x = .17268, y = .3546, orientation = -90 (-pi/2)
+        self.declare_parameter('dock_approach_x', 0.17268)
+        self.declare_parameter('dock_approach_y', 0.3546)
+        
+        self.declare_parameter('dock_orientation', -math.pi / 2.0)
+        
+        # Offsets to place the drawing relative to the dock
+        self.declare_parameter('drawing_x_shift', 0.0)
+        self.declare_parameter('drawing_y_shift', 0.0)
+        
+        self.declare_parameter('reflect_y_about_center', True)
+        self.declare_parameter('target_canvas_width', 0.7)
         
         # Load parameters into constants
         self.DOCK_POSITION = (
@@ -55,9 +62,12 @@ class ImageProcessorNode(Node):
             self.get_parameter('dock_approach_y').value
         )
         self.DOCK_ORIENTATION = self.get_parameter('dock_orientation').value
+        self.DRAWING_X_SHIFT = self.get_parameter('drawing_x_shift').value
+        self.DRAWING_Y_SHIFT = self.get_parameter('drawing_y_shift').value
+        self.REFLECT_Y_ABOUT_CENTER = self.get_parameter('reflect_y_about_center').value
         self.TARGET_CANVAS_WIDTH = self.get_parameter('target_canvas_width').value
         
-        # Other constants (not parameterized yet)
+        # Other constants
         self.CANVAS_PADDING = 0.05
         self.ROBOT_SIDE_LENGTH = 0.1732
         self.MARKER_OFFSET_X = 0.05
@@ -133,6 +143,35 @@ class ImageProcessorNode(Node):
         
         polylines = stages.rescaled_polylines
         
+        # 1. FLIP Y-COORDINATES OF POLYLINES (Geometry Flip)
+        if self.REFLECT_Y_ABOUT_CENTER and polylines:
+            all_y = [y for polyline in polylines for x, y in polyline]
+            min_y = min(all_y)
+            max_y = max(all_y)
+            center_y = 0.5 * (min_y + max_y)
+            
+            flipped_polylines = []
+            for polyline in polylines:
+                flipped = [(x, 2 * center_y - y) for x, y in polyline]
+                flipped_polylines.append(flipped)
+            polylines = flipped_polylines
+
+        # 2. TRANSFORM DRAWING TO ABSOLUTE MAP COORDINATES
+        # We shift the drawing so it is placed relative to your specific Dock Position.
+        # This keeps the Dock fixed at (-0.1174, 0.5243) and moves the drawing around it.
+        offset_x = self.DOCK_POSITION[0] + self.DRAWING_X_SHIFT
+        offset_y = self.DOCK_POSITION[1] + self.DRAWING_Y_SHIFT
+        
+        transformed_polylines = []
+        for polyline in polylines:
+            transformed = [(x + offset_x, y + offset_y) for x, y in polyline]
+            transformed_polylines.append(transformed)
+        polylines = transformed_polylines
+        
+        # 3. USE YOUR ABSOLUTE DOCK COORDINATES DIRECTLY
+        # Since we moved the drawing into the Map Frame, we can use the real dock/approach values.
+        dock_orientation = self.DOCK_ORIENTATION  # Use the physical orientation directly (-90 deg)
+        
         # Plan stroke order
         strokes = strokes_from_polylines(polylines)
         if not strokes:
@@ -140,7 +179,7 @@ class ImageProcessorNode(Node):
         
         ordered_strokes = order_strokes_with_containment(strokes, start_position=self.DOCK_APPROACH)
         
-        # Compute orientations (all phases)
+        # Compute orientations (all phases) in Map Coordinates
         undock_wps, draw_wps, dock_wps = plan_all_orientations(
             ordered_strokes,
             robot_side_length=self.ROBOT_SIDE_LENGTH,
@@ -149,20 +188,13 @@ class ImageProcessorNode(Node):
             samples_per_stroke=100,
             collision_buffer=self.ERASE_MARGIN,
             smooth_rate=0.3,
-            dock_position=self.DOCK_POSITION,
-            dock_approach=self.DOCK_APPROACH,
-            dock_orientation=self.DOCK_ORIENTATION,
+            dock_position=self.DOCK_POSITION,  # e.g., (-0.1174, 0.5243)
+            dock_approach=self.DOCK_APPROACH,  # e.g., (0.17268, 0.3546)
+            dock_orientation=dock_orientation,
         )
         
-        # Combine all waypoints
+        # Combine all waypoints (They are already in the correct Map Frame)
         all_wps = undock_wps + draw_wps + dock_wps
-        
-        # Offset the path so DOCK_POSITION becomes (0, 0)
-        offset_x = -self.DOCK_POSITION[0]
-        offset_y = -self.DOCK_POSITION[1]
-        for wp in all_wps:
-            wp.x += offset_x
-            wp.y += offset_y
         
         # Optimize for pure translation
         all_wps = optimize_waypoints_for_pure_translation(all_wps, rotation_threshold_rad=0.05)
@@ -170,7 +202,7 @@ class ImageProcessorNode(Node):
         # Convert to Path message
         path_msg = Path()
         path_msg.header.stamp = self.get_clock().now().to_msg()
-        path_msg.header.frame_id = 'map'  # Assuming map frame
+        path_msg.header.frame_id = 'map' 
         
         for wp in all_wps:
             pose = PoseStamped()

@@ -152,10 +152,9 @@ class LidarReceiver(threading.Thread):
 
 class ScanAssembler:
     """
-    Assembles individual lidar packets into partial scans.
+    Assembles individual lidar packets into complete 360-degree scans.
     
-    Accumulates points from multiple packets and publishes at 180-degree intervals
-    for faster update rates (~2x improvement over full 360-degree scans).
+    Accumulates points from multiple packets until a full rotation is detected.
     """
     
     def __init__(self, angle_tol):
@@ -172,8 +171,6 @@ class ScanAssembler:
         """Reset assembler state for a new scan."""
         self.points = defaultdict(lambda: {"dist": [], "int": []})
         self.start_angle = None
-        self.min_angle = None
-        self.max_angle = None
 
     def add_packet(self, ts, addr, angles, distances, intensities):
         """
@@ -189,34 +186,16 @@ class ScanAssembler:
         Returns:
             Completed scan tuple (ts, addr, angles, distances, intensities) or None
         """
-        if not angles:
-            return None
-            
-        # Track angle range for this scan
-        packet_min = min(angles)
-        packet_max = max(angles)
-        
-        if self.min_angle is None:
-            self.min_angle = packet_min
-            self.max_angle = packet_max
-        else:
-            self.min_angle = min(self.min_angle, packet_min)
-            self.max_angle = max(self.max_angle, packet_max)
+        if self.start_angle is None and angles:
+            self.start_angle = min(angles)
 
-        # Add points to scan
         for a, d, i in zip(angles, distances, intensities or [None] * len(distances)):
             key = round(a / self.angle_tol) * self.angle_tol
             self.points[key]["dist"].append(d)
             if i is not None:
                 self.points[key]["int"].append(i)
 
-        # Publish when we have 180+ degrees of coverage
-        # Handle angle wrapping around 0/360
-        coverage = self.max_angle - self.min_angle
-        if coverage < 0:  # Wrapped around 0/360
-            coverage = 360 + coverage
-            
-        if coverage >= 180.0 and len(self.points) > 10:  # Minimum 10 points
+        if angles and min(angles) < (self.start_angle or 0) * 0.5:
             return self._finalize_scan(ts, addr)
         return None
 

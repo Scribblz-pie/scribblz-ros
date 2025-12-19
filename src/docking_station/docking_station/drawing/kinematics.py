@@ -90,7 +90,8 @@ class KinematicsNode(Node):
     def state_callback(self, msg: String):
         """Handle robot state changes."""
         self.current_state = msg.data
-        self.active = (self.current_state == 'drawing')
+        # Be active in both drawing and docking states so docking waypoints are executed.
+        self.active = (self.current_state == 'drawing' or self.current_state == 'docking' or self.current_state == 'undocking')
         if not self.active:
             # Stop robot when not in drawing state
             self.publish_stop()
@@ -166,14 +167,17 @@ class KinematicsNode(Node):
         - Wheel 2: at 210 degrees
         - Wheel 3: at 330 degrees
         
-        Note: Input follows ROS convention (+Y = left), but physical robot wiring
-        has +Y = right, so we negate vy_body to compensate.
+        Note: Input follows ROS convention (+Y = left, +omega = CCW), but physical 
+        robot wiring has +Y = right and +omega = CW, so we negate both to compensate.
         """
         l = self.robot_radius
         sqrt3 = math.sqrt(3.0)
         
         # Negate vy to convert ROS convention (+Y = left) to physical wiring (+Y = right)
         vy = -vy_body
+        
+        # Negate omega to convert ROS convention (+omega = CCW) to physical wiring (+omega = CW)
+        omega = -omega
         
         v1 = vy + l * omega
         v2 = -0.5 * vy - (sqrt3 / 2.0) * vx_body + l * omega

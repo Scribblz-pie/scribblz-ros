@@ -91,15 +91,15 @@ class TeleopNode(Node):
         Mapping:
         - axes[0]: 1 = left, -1 = right (strafe)
         - axes[1]: 1 = up, -1 = down (strafe)
-        - buttons[3]: 1 = rotate left
-        - buttons[1]: 1 = rotate right
+        - buttons[1]: 1 = rotate left
+        - buttons[3]: 1 = rotate right
         - buttons[marker_button_index]: 1 = marker down (True), 0 = marker up (False)
         """
         # Extract joystick values
         strafe_left_right = msg.axes[0] if len(msg.axes) > 0 else 0.0  # 1=left, -1=right
         strafe_up_down = msg.axes[1] if len(msg.axes) > 1 else 0.0  # 1=up, -1=down
-        rotate_left = msg.buttons[3] if len(msg.buttons) > 3 else 0  # rotate left
-        rotate_right = msg.buttons[1] if len(msg.buttons) > 1 else 0  # rotate right
+        rotate_left = msg.buttons[1] if len(msg.buttons) > 3 else 0  # rotate left
+        rotate_right = msg.buttons[3] if len(msg.buttons) > 1 else 0  # rotate right
 
         # Convert to robot velocity commands
         # For omni robot: x = forward/backward, y = left/right

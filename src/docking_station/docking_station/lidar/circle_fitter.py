@@ -22,10 +22,18 @@ class CircleFitter:
     Uses RANSAC algorithm to robustly detect circular targets in the scan.
     """
     
+    def __init__(self, logger=None):
+        """
+        Initialize CircleFitter.
+        
+        Args:
+            logger: Optional ROS2 logger instance for debug output
+        """
+        self.logger = logger
+    
     def find_small_clusters(self, points, min_pts, max_pts, dist_thresh):
         """
         Find clusters of points within a distance threshold.
-        Optimized with vectorized operations and boolean masks.
         
         Args:
             points: numpy array of (x, y) points
@@ -39,14 +47,11 @@ class CircleFitter:
         if len(points) < min_pts:
             return []
 
-        n_points = len(points)
-        unvisited = np.ones(n_points, dtype=bool)
+        unvisited = set(range(len(points)))
         clusters = []
 
-        while np.any(unvisited):
-            # Get first unvisited point as seed
-            seed = np.where(unvisited)[0][0]
-            unvisited[seed] = False
+        while unvisited:
+            seed = unvisited.pop()
             cluster_indices = [seed]
             to_check = [seed]
 
@@ -54,20 +59,16 @@ class CircleFitter:
                 current = to_check.pop()
                 current_point = points[current]
 
-                # Vectorized distance computation for all unvisited points
-                if np.any(unvisited):
-                    unvisited_indices = np.where(unvisited)[0]
-                    if len(unvisited_indices) > 0:
-                        unvisited_points = points[unvisited_indices]
-                        # Optimized distance calculation
-                        diff = unvisited_points - current_point
-                        distances = np.sqrt(np.sum(diff * diff, axis=1))
-                        nearby_mask = distances < dist_thresh
+                unvisited_list = list(unvisited)
+                if len(unvisited_list) > 0:
+                    unvisited_points = points[unvisited_list]
+                    distances = np.linalg.norm(unvisited_points - current_point, axis=1)
+                    nearby_mask = distances < dist_thresh
 
-                        # Process all nearby points at once
-                        nearby_indices = unvisited_indices[nearby_mask]
-                        for idx in nearby_indices:
-                            unvisited[idx] = False
+                    for i, is_nearby in enumerate(nearby_mask):
+                        if is_nearby:
+                            idx = unvisited_list[i]
+                            unvisited.discard(idx)
                             cluster_indices.append(idx)
                             to_check.append(idx)
 
@@ -80,7 +81,6 @@ class CircleFitter:
     def filter_valid_points(self, points, min_dist, max_dist):
         """
         Filter points by distance from origin.
-        Optimized with vectorized squared distances to avoid sqrt when possible.
         
         Args:
             points: numpy array of (x, y) points (cm)
@@ -90,15 +90,13 @@ class CircleFitter:
         Returns:
             Filtered numpy array of points
         """
-        # Use squared distances for faster comparison
-        distances_sq = points[:, 0] ** 2 + points[:, 1] ** 2
-        valid_mask = (distances_sq > min_dist ** 2) & (distances_sq < max_dist ** 2)
+        distances = np.sqrt(points[:, 0] ** 2 + points[:, 1] ** 2)
+        valid_mask = (distances > min_dist) & (distances < max_dist)
         return points[valid_mask]
 
     def _fit_circle_algebraic(self, points):
         """
         Fit a circle to points using algebraic least squares.
-        Optimized with vectorized operations and efficient matrix construction.
         
         Args:
             points: numpy array of at least 3 (x, y) points
@@ -111,21 +109,14 @@ class CircleFitter:
         try:
             x = points[:, 0]
             y = points[:, 1]
-            # Optimized matrix construction
-            n = len(points)
-            A = np.empty((n, 3))
-            A[:, 0] = 2 * x
-            A[:, 1] = 2 * y
-            A[:, 2] = 1.0
-            # Pre-compute x² + y² (cached for reuse)
-            b = x * x + y * y
-            # Solve using lstsq (internally uses optimized LAPACK)
+            A = np.column_stack([2 * x, 2 * y, np.ones(len(points))])
+            b = x ** 2 + y ** 2
             params, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
             cx, cy, D = params
-            r_squared = cx * cx + cy * cy + D
+            r_squared = cx ** 2 + cy ** 2 + D
             if r_squared <= 0:
                 return None
-            r = np.sqrt(r_squared)  # Use numpy sqrt for consistency
+            r = math.sqrt(r_squared)
             return (cx, cy, r)
         except Exception:
             return None
@@ -152,19 +143,13 @@ class CircleFitter:
         if len(angles) < cfg["min_circle_points"]:
             return None
 
-        # Convert polar to Cartesian coordinates (in cm) - VECTORIZED
-        # Lidar frame convention: 
-        # - x axis: forward (0° = +x direction, standard ROS convention)
-        # - y axis: left (90° = +y direction)
-        # - z axis: up
-        # The static transform from lidar to base_link handles the actual mounting orientation
-        angles_np = np.array(angles)
-        distances_np = np.array(distances)
-        angles_rad = np.radians(angles_np)
-        points = np.column_stack([
-            distances_np * 100.0 * np.cos(angles_rad),
-            distances_np * 100.0 * np.sin(angles_rad)
-        ])
+        # Convert polar to Cartesian coordinates (in cm)
+        points = np.array([(dist * 100.0 * math.cos(math.radians(angle)),
+                            dist * 100.0 * math.sin(math.radians(angle)))
+                           for angle, dist in zip(angles, distances)])
+        
+        if self.logger:
+            self.logger.debug(f"Input: {len(angles)} points")
 
         # Filter by distance
         valid_points = self.filter_valid_points(
@@ -172,29 +157,49 @@ class CircleFitter:
             cfg["min_detection_distance_cm"], 
             cfg["max_detection_distance_cm"]
         )
+        if self.logger:
+            self.logger.debug(f"After distance filter ({cfg['min_detection_distance_cm']:.1f}-{cfg['max_detection_distance_cm']:.1f} cm): {len(valid_points)} valid points")
         if len(valid_points) < cfg["min_circle_points"]:
+            if self.logger:
+                self.logger.debug(f"Not enough valid points ({len(valid_points)} < {cfg['min_circle_points']})")
             return None
 
         # Find clusters
         clusters = self.find_small_clusters(
             valid_points, 
             cfg["min_circle_points"], 
-            30,  # max_pts
+            100,  # max_pts
             10.0  # dist_thresh (cm)
         )
+        if self.logger:
+            self.logger.debug(f"Found {len(clusters)} clusters")
+            if len(clusters) > 0:
+                cluster_sizes = [len(c) for c in clusters]
+                self.logger.debug(f"Cluster sizes: {cluster_sizes}")
+                # Log centroid of each cluster
+                for i, cluster in enumerate(clusters):
+                    centroid_x = np.mean(cluster[:, 0])
+                    centroid_y = np.mean(cluster[:, 1])
+                    dist_from_origin = np.sqrt(centroid_x**2 + centroid_y**2)
+                    self.logger.debug(f"  Cluster {i}: {len(cluster)} points, centroid=({centroid_x:.2f}, {centroid_y:.2f}) cm, dist={dist_from_origin:.2f} cm")
+        
         if len(clusters) == 0:
+            if self.logger:
+                self.logger.debug("No clusters found")
             return None
 
-        # RANSAC fitting with early termination
+        # RANSAC fitting
         best_fit = None
         best_score = float('inf')
-        early_termination_threshold = 0.5  # Stop if score is excellent
 
-        for cluster_points in clusters:
+        for cluster_idx, cluster_points in enumerate(clusters):
             if len(cluster_points) < cfg["min_circle_points"]:
                 continue
+            
+            if self.logger:
+                self.logger.debug(f"Processing cluster {cluster_idx} with {len(cluster_points)} points")
 
-            for _ in range(cfg["ransac_iterations"]):
+            for iteration in range(cfg["ransac_iterations"]):
                 if len(cluster_points) < 3:
                     break
 
@@ -211,7 +216,7 @@ class CircleFitter:
                    r > cfg["expected_radius_cm"] + cfg["radius_tolerance_cm"]:
                     continue
 
-                # Find inliers - vectorized distance calculation
+                # Find inliers
                 distances_to_circle = np.abs(
                     np.sqrt((cluster_points[:, 0] - cx) ** 2 + (cluster_points[:, 1] - cy) ** 2) - r
                 )
@@ -230,10 +235,13 @@ class CircleFitter:
                     refined_fit = self._fit_circle_algebraic(inlier_points)
                     if refined_fit is not None:
                         best_fit = (*refined_fit, inlier_count)
-                        
-                        # Early termination if excellent fit found
-                        if best_score < early_termination_threshold:
-                            return best_fit
+                        if self.logger:
+                            self.logger.debug(f"  New best fit: center=({refined_fit[0]:.2f}, {refined_fit[1]:.2f}) cm, radius={refined_fit[2]:.2f} cm, inliers={inlier_count}, score={score:.4f}")
 
+        if self.logger:
+            if best_fit is not None:
+                self.logger.debug(f"Final result: center=({best_fit[0]:.2f}, {best_fit[1]:.2f}) cm, radius={best_fit[2]:.2f} cm, inliers={best_fit[3]}")
+            else:
+                self.logger.debug("No valid circle fit found")
+        
         return best_fit
-

@@ -75,7 +75,16 @@ def generate_launch_description():
         package='docking_station',
         executable='image_processor',
         name='image_processor',
-        output='screen'
+        output='screen',
+        parameters=[{
+            'dock_position_x': -0.1,
+            'dock_position_y': 0.3,
+            'dock_approach_x': 0.144,
+            'dock_approach_y': 0.175,
+            'dock_orientation': -1.5708,
+            'drawing_x_shift': 0.05,
+            'drawing_y_shift': 0.31
+        }]
     )
 
     # Path follower node (executes drawing paths with PID control)
@@ -100,7 +109,8 @@ def generate_launch_description():
             'kp_heading': 1.0,
             'ki_heading': 0.0,
             'kd_heading': 0.0
-        }]
+        }],
+        arguments=['--ros-args', '--log-level', 'debug']
     )
 
     # Docking action server node
@@ -133,13 +143,14 @@ def generate_launch_description():
             'print_interval': 2.0,
             'robot_orientation_offset': -1.5708,  # -90° (or 270°) - robot forward alignment
             'expected_radius_cm': 3.0,
-            'radius_tolerance_cm': 5.0,
-            'min_circle_points': 3,
+            'radius_tolerance_cm': 3.0,  # Tighter tolerance (was 5.0) for improved accuracy
+            'min_circle_points': 5,  # Increased from 3 for more stable fits
             'ransac_iterations': 25,  # Reduced from 50 for faster processing with early termination
-            'inlier_threshold_cm': 2.0,
-            'min_detection_distance_cm': 5.0,
+            'inlier_threshold_cm': 1.5,  # Tighter threshold (was 2.0) for better precision
+            'min_detection_distance_cm': 10.0,  # Increased from 5.0 to avoid very close detections
             'max_detection_distance_cm': 500.0
-        }]
+        }],
+        arguments=['--ros-args', '--log-level', 'info']
     )
 
     # Static transform: odom → map (defines map as child of odom for TF tree)

@@ -98,7 +98,7 @@ class LidarProcessor(Node):
         self.stop_event = threading.Event()
         self.receiver = LidarReceiver(self.host, self.port, self.buffer, self.stop_event, self.print_interval)
         self.assembler = ScanAssembler(self.angle_tol)
-        self.circle_fitter = CircleFitter()
+        self.circle_fitter = CircleFitter(logger=self.get_logger())
 
         # Start receiver thread and processing timer
         self.receiver.start()

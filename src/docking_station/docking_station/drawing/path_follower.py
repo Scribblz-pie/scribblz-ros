@@ -19,7 +19,9 @@ import tf2_ros
 from tf2_ros import TransformException, TransformBroadcaster
 from tf2_geometry_msgs import do_transform_pose
 from scipy.spatial.transform import Rotation
-
+from ament_index_python.packages import get_package_share_directory
+import json
+import os
 
 
 
@@ -45,8 +47,13 @@ class PathFollowerNode(Node):
         self.declare_parameter('heading_scale', 1.0)  # radians - full speed at 1 radian (~57°) heading error
         
         # Dead zone parameters - stop sending commands when very close to target
-        self.declare_parameter('position_dead_zone', 0.03)  # meters - no movement within 3cm
-        self.declare_parameter('heading_dead_zone', 0.08)  # radians - no rotation within ~4.6°
+        self.declare_parameter('position_dead_zone', 0.06)  # meters - no movement within 3cm
+        self.declare_parameter('heading_dead_zone', 0.12)  # radians - no rotation within ~4.6°
+        
+        # Waypoint files used for drawing, docking, and undocking states
+        self.declare_parameter('drawing_waypoint_file', 'drawing_path.json')
+        self.declare_parameter('docking_waypoint_file', 'enter_docking_station.json')
+        self.declare_parameter('undocking_waypoint_file', 'undocking_path.json')
         
         # Get parameter values
         self.waypoint_tolerance = self.get_parameter('waypoint_tolerance').get_parameter_value().double_value
@@ -90,6 +97,11 @@ class PathFollowerNode(Node):
         self.cancel_sub = self.create_subscription(
             Empty, '/cancel_drawing', self.cancel_callback, 1)
         
+        # Undocking start trigger (from state machine after fan ramp)
+        self.undocking_start_sub = self.create_subscription(
+            Empty, '/undocking/start', self.undocking_start_callback, 1
+        )
+        
         self.state_sub = self.create_subscription(
             String, '/robot_state', self.state_callback, 10)
         
@@ -100,6 +112,10 @@ class PathFollowerNode(Node):
         self.cmd_vel_pub = self.create_publisher(Twist, '/drawing/cmd_vel', 1)
         self.progress_pub = self.create_publisher(Float64, '/drawing/feedback/progress', 1)
         self.waypoint_index_pub = self.create_publisher(UInt32, '/drawing/feedback/waypoint_index', 1)
+        # Current waypoint for docking/undocking (mirrors current target waypoint)
+        self.current_docking_wp_pub = self.create_publisher(
+            PoseStamped, '/docking/current_waypoint', 1
+        )
         
         # Setup TF2 transform listener and broadcaster
         self.tf_buffer = tf2_ros.Buffer()
@@ -119,19 +135,62 @@ class PathFollowerNode(Node):
         old_state = self.current_state
         self.current_state = msg.data
         was_active = self.active
-        self.active = (self.current_state == 'drawing')
+        # Treat drawing, docking, and undocking as active path-following states
+        self.active = self.current_state in ('drawing', 'docking', 'undocking')
         
         if old_state != self.current_state:
             self.get_logger().info(f'State changed: {old_state} -> {self.current_state}')
         
-        # Start execution when entering drawing state
-        if self.active and not was_active:
-            if self.stored_path is not None:
-                self.get_logger().info('Entering drawing state - starting path execution')
-                self.current_path = self.stored_path
-                self.start_execution()
-            else:
-                self.get_logger().warn('Entered drawing state but no stored path available')
+        # Handle per-state entry whenever the state actually changes
+        if old_state != self.current_state and self.active:
+            if self.current_state == 'drawing':
+                # Load drawing waypoints from JSON and start execution, with fallback to stored_path
+                drawing_file = self.get_parameter('drawing_waypoint_file').get_parameter_value().string_value
+                path = self.load_waypoints_path_from_file(drawing_file)
+                if path is not None and len(path.poses) > 0:
+                    self.get_logger().info(
+                        f'Entering drawing state - loaded {len(path.poses)} waypoints from {drawing_file}'
+                    )
+                    self.stored_path = path
+                    self.current_path = path
+                    self.start_execution()
+                elif self.stored_path is not None:
+                    self.get_logger().warn(
+                        'Drawing JSON not found or empty, using stored path from /execute_drawing_path'
+                    )
+                    self.current_path = self.stored_path
+                    self.start_execution()
+                else:
+                    self.get_logger().warn('Entered drawing state but no drawing waypoints available')
+            elif self.current_state == 'docking':
+                # Load docking waypoints from JSON and start execution
+                docking_file = self.get_parameter('docking_waypoint_file').get_parameter_value().string_value
+                path = self.load_waypoints_path_from_file(docking_file)
+                if path is not None and len(path.poses) > 0:
+                    self.get_logger().info(
+                        f'Entering docking state - loaded {len(path.poses)} waypoints from {docking_file}'
+                    )
+                    self.stored_path = path
+                    self.current_path = path
+                    self.start_execution()
+                else:
+                    self.get_logger().warn(
+                        f'Entering docking state but failed to load waypoints from {docking_file}'
+                    )
+            elif self.current_state == 'undocking':
+                # Load undocking waypoints from JSON (motion will start after /undocking/start trigger)
+                undocking_file = self.get_parameter('undocking_waypoint_file').get_parameter_value().string_value
+                path = self.load_waypoints_path_from_file(undocking_file)
+                if path is not None and len(path.poses) > 0:
+                    self.get_logger().info(
+                        f'Entering undocking state - loaded {len(path.poses)} waypoints from {undocking_file}'
+                    )
+                    self.stored_path = path
+                    self.current_path = path
+                else:
+                    self.get_logger().warn(
+                        f'Entering undocking state but failed to load waypoints from {undocking_file}'
+                    )
         
         # Stop execution when exiting drawing state
         elif not self.active and was_active:
@@ -171,6 +230,83 @@ class PathFollowerNode(Node):
                 f'yaw={math.degrees(self.current_yaw):.1f}°'
             )
             self.has_pose = True
+
+    def load_waypoints_path_from_file(self, filepath: str) -> Optional[Path]:
+        """Load waypoints from a JSON file and convert to a Path message.
+
+        The JSON file should have the structure:
+        {
+          "waypoints": [
+            {"x": ..., "y": ..., "yaw": <degrees>, "marker": <bool>},
+            ...
+          ]
+        }
+        """
+        if not filepath:
+            self.get_logger().error('No docking waypoint file specified')
+            return None
+
+        # Resolve relative paths using the installed package share directory.
+        if not os.path.isabs(filepath):
+            try:
+                share_dir = get_package_share_directory('docking_station')
+            except Exception as exc:
+                self.get_logger().error(
+                    f'Error locating package share directory for docking_station: {exc}'
+                )
+                return None
+
+            waypoints_dir = os.path.join(share_dir, 'waypoints')
+            filepath = os.path.join(waypoints_dir, filepath)
+
+        if not os.path.exists(filepath):
+            self.get_logger().error(f'Docking waypoint file not found: {filepath}')
+            return None
+
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            if 'waypoints' not in data:
+                self.get_logger().error(f'No \"waypoints\" key in docking file: {filepath}')
+                return None
+
+            path_msg = Path()
+            path_msg.header.stamp = self.get_clock().now().to_msg()
+            path_msg.header.frame_id = 'map'
+
+            for wp in data['waypoints']:
+                x = float(wp.get('x', 0.0))
+                y = float(wp.get('y', 0.0))
+                yaw_deg = float(wp.get('yaw', 0.0))
+                yaw_rad = math.radians(yaw_deg)
+
+                pose = PoseStamped()
+                pose.header = path_msg.header
+                pose.pose.position.x = x
+                pose.pose.position.y = y
+                pose.pose.position.z = 0.0
+
+                # Convert yaw (rad) to quaternion (z, w)
+                half_yaw = yaw_rad / 2.0
+                pose.pose.orientation.x = 0.0
+                pose.pose.orientation.y = 0.0
+                pose.pose.orientation.z = math.sin(half_yaw)
+                pose.pose.orientation.w = math.cos(half_yaw)
+
+                path_msg.poses.append(pose)
+
+            self.get_logger().info(
+                f'Loaded {len(path_msg.poses)} docking waypoints from {filepath}'
+            )
+            # Publish the first waypoint as the current docking/undocking waypoint
+            if path_msg.poses and self.current_state in ('docking', 'undocking'):
+                self.current_docking_wp_pub.publish(path_msg.poses[0])
+            return path_msg
+
+        except Exception as exc:
+            self.get_logger().error(f'Error loading docking waypoints from {filepath}: {exc}')
+            return None
     
     def path_callback(self, msg: Path):
         """Handle new path received."""
@@ -194,6 +330,12 @@ class PathFollowerNode(Node):
         self.get_logger().info('Cancellation requested')
         self.cancel_requested = True
         self.stop_execution()
+
+    def undocking_start_callback(self, msg: Empty):
+        """Start undocking path execution after fan ramp completes."""
+        if self.current_state == 'undocking' and self.current_path is not None and not self.executing:
+            self.get_logger().info('Received undocking start trigger - starting undocking path execution')
+            self.start_execution()
     
     def start_execution(self):
         """Start executing the current path."""
@@ -215,6 +357,10 @@ class PathFollowerNode(Node):
         self.executing = True
         self.cancel_requested = False
         self.current_waypoint_idx = 0
+
+        # Publish current docking/undocking waypoint
+        if self.current_state in ('docking', 'undocking') and self.current_path.poses:
+            self.current_docking_wp_pub.publish(self.current_path.poses[self.current_waypoint_idx])
         
         # Start control loop
         self.control_timer = self.create_timer(self.dt, self.control_loop)
@@ -429,6 +575,10 @@ class PathFollowerNode(Node):
             lateral_error = waypoint_in_base_link[1]
             heading_error = waypoint_in_base_link[2]
             
+            # Normalize heading error to [-π, π] to always pick shortest rotation path
+            # This is critical to prevent issues at ±180° discontinuity
+            heading_error = math.atan2(math.sin(heading_error), math.cos(heading_error))
+            
             # Calculate distance for waypoint completion check
             distance = math.sqrt(forward_error**2 + lateral_error**2)
             
@@ -444,6 +594,14 @@ class PathFollowerNode(Node):
             )
             self.current_waypoint_idx += 1
             self.publish_progress()
+
+            # If in docking/undocking state, publish the new current docking waypoint
+            if (
+                self.current_state in ('docking', 'undocking')
+                and self.current_waypoint_idx < len(self.current_path.poses)
+            ):
+                self.current_docking_wp_pub.publish(self.current_path.poses[self.current_waypoint_idx])
+
             return
         
         # Debug: Log errors in both frames

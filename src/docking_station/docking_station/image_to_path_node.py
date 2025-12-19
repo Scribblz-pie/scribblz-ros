@@ -38,11 +38,14 @@ class ImageProcessorNode(Node):
         super().__init__('image_processor')
         
         # Declare parameters
-        self.declare_parameter('dock_position_x', 1.05)
-        self.declare_parameter('dock_position_y', 1.05)
-        self.declare_parameter('dock_approach_x', 1.05)
-        self.declare_parameter('dock_approach_y', 0.95)
-        self.declare_parameter('dock_orientation', math.pi)
+        self.declare_parameter('dock_position_x', -0.1)
+        self.declare_parameter('dock_position_y', 0.3)
+        self.declare_parameter('dock_approach_x', 0.144)
+        self.declare_parameter('dock_approach_y', 0.175)
+        self.declare_parameter('dock_orientation', -math.pi / 2.0)
+        self.declare_parameter('drawing_x_shift', 0.0)
+        self.declare_parameter('drawing_y_shift', 0.0)
+        self.declare_parameter('reflect_y_about_center', True)
         self.declare_parameter('target_canvas_width', 1.0)
         
         # Load parameters into constants
@@ -55,13 +58,16 @@ class ImageProcessorNode(Node):
             self.get_parameter('dock_approach_y').value
         )
         self.DOCK_ORIENTATION = self.get_parameter('dock_orientation').value
+        self.DRAWING_X_SHIFT = self.get_parameter('drawing_x_shift').value
+        self.DRAWING_Y_SHIFT = self.get_parameter('drawing_y_shift').value
+        self.REFLECT_Y_ABOUT_CENTER = self.get_parameter('reflect_y_about_center').value
         self.TARGET_CANVAS_WIDTH = self.get_parameter('target_canvas_width').value
         
         # Other constants (not parameterized yet)
         self.CANVAS_PADDING = 0.05
         self.ROBOT_SIDE_LENGTH = 0.1732
         self.MARKER_OFFSET_X = 0.05
-        self.MARKER_OFFSET_Y = -0.0577
+        self.MARKER_OFFSET_Y = 0.0577
         self.ERASE_MARGIN = 0.01
         self.ROBOT_SPEED = 0.1
         self.ROBOT_TURN_SPEED_DEG_PER_SEC = 90.0
@@ -157,12 +163,21 @@ class ImageProcessorNode(Node):
         # Combine all waypoints
         all_wps = undock_wps + draw_wps + dock_wps
         
-        # Offset the path so DOCK_POSITION becomes (0, 0)
+        # Optional: reflect Y about drawing center (avoids flipping around top edge)
+        if self.REFLECT_Y_ABOUT_CENTER and all_wps:
+            min_y = min(wp.y for wp in all_wps)
+            max_y = max(wp.y for wp in all_wps)
+            center_y = 0.5 * (min_y + max_y)
+            for wp in all_wps:
+                wp.y = 2 * center_y - wp.y
+                wp.theta = -wp.theta
+        
+        # Offset to dock origin, then apply optional drawing shifts
         offset_x = -self.DOCK_POSITION[0]
         offset_y = -self.DOCK_POSITION[1]
         for wp in all_wps:
-            wp.x += offset_x
-            wp.y += offset_y
+            wp.x = wp.x + offset_x + self.DRAWING_X_SHIFT
+            wp.y = wp.y + offset_y + self.DRAWING_Y_SHIFT
         
         # Optimize for pure translation
         all_wps = optimize_waypoints_for_pure_translation(all_wps, rotation_threshold_rad=0.05)

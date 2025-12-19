@@ -701,30 +701,33 @@ def plan_all_orientations(
         else:
             first_tangent = (1.0, 0.0)
         
-        # Step 1: Start at dock position
+        # Step 1: Start at dock position (internal only, do not publish as first waypoint)
         dock_wp = OrientedWaypoint(
             x=dock_position[0], y=dock_position[1], theta=dock_orientation,
             pen_down=False, tangent_x=0.0, tangent_y=1.0,  # Pointing up
             stroke_index=-1, t_param=0.0,
         )
-        undock_waypoints.append(dock_wp)
         
-        # Step 2: Rise up to approach point (if different from dock)
+        # Step 2: Rise up to approach point (if different from dock). First published waypoint should be the approach.
         if dock_approach and dock_approach != dock_position:
             approach_wp = OrientedWaypoint(
                 x=dock_approach[0], y=dock_approach[1], theta=dock_orientation,
                 pen_down=False, tangent_x=0.0, tangent_y=1.0,
                 stroke_index=-1, t_param=0.0,
             )
-            # Interpolate from dock to approach
             dock_to_approach = plan_penup_travel(
                 dock_wp, dock_approach, (0.0, 1.0),  # Moving up
                 None, robot_side_length, marker_offset_x, marker_offset_y,
                 num_samples=5,  # Short travel, few samples
             )
-            undock_waypoints.extend(dock_to_approach)
-            last_undock_wp = undock_waypoints[-1]
+            # Skip the initial dock sample so the first published waypoint is the approach side
+            if dock_to_approach:
+                undock_waypoints.extend(dock_to_approach[1:])
+            else:
+                undock_waypoints.append(approach_wp)
+            last_undock_wp = undock_waypoints[-1] if undock_waypoints else approach_wp
         else:
+            # No distinct approach; use dock as starting reference but do not publish it
             last_undock_wp = dock_wp
         
         # Step 3: Travel from approach to first stroke

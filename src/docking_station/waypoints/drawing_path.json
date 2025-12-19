@@ -1,0 +1,28 @@
+{
+  "waypoints": [
+    {
+      "x": 0.15,
+      "y": 0.15,
+      "yaw": 0.0,
+      "marker": false
+    },
+    {
+      "x": 0.35,
+      "y": 0.15,
+      "yaw": 0.0,
+      "marker": false
+    },
+    {
+      "x": 0.35,
+      "y": 0.35,
+      "yaw": 90.0,
+      "marker": false
+    },
+    {
+      "x": 0.15,
+      "y": 0.35,
+      "yaw": 180.0,
+      "marker": false
+    }
+  ]
+}
